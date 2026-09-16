@@ -1,0 +1,4 @@
+data/documents/*
+!data/documents/.gitkeep
+frontend/node_modules/
+frontend/dist/

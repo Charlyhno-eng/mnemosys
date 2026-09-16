@@ -1,0 +1,5 @@
+# Mnemosys application configuration.
+# The selected directory contains the application-owned Mnemosys-Vault folder.
+
+[storage]
+path = "/home/charly/Téléchargements"
