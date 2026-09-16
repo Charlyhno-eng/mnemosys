@@ -19,7 +19,7 @@ func TestHandlerDocumentEndpoints(t *testing.T) {
 	service, _ := newTestService(t)
 	handler := NewHandler(service)
 
-	create := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewBufferString(`{"path":"home.md","type":"document","content":"# Home"}`))
+	create := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewBufferString(`{"path":"home.md","type":"document","pageType":"technical","content":"# Home"}`))
 	create.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, create)
@@ -30,8 +30,19 @@ func TestHandlerDocumentEndpoints(t *testing.T) {
 	get := httptest.NewRequest(http.MethodGet, "/api/documents/content?path=home.md", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, get)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("# Home")) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("# Home")) || !bytes.Contains(response.Body.Bytes(), []byte(`"id":`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"pageType":"technical"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"updatedAt":`)) {
 		t.Fatalf("get status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerRejectsInvalidPageType(t *testing.T) {
+	service, _ := newTestService(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewBufferString(`{"path":"home.md","type":"document","pageType":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -160,5 +171,20 @@ func TestHandlerBrowsesDirectories(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"name":"docs"`)) {
 		t.Fatalf("browse status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerUpdatesApplicationSettings(t *testing.T) {
+	service, _ := newTestService(t)
+	body, err := json.Marshal(ApplicationSettingsInput{PageTypes: defaultPageTypes()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/settings/application", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"id":"business"`)) {
+		t.Fatalf("update settings status = %d, body = %s", response.Code, response.Body.String())
 	}
 }

@@ -1,96 +1,89 @@
 # AGENTS.md
 
-## Projet
+## Project
 
-Cette application est une plateforme de **mémoire et de connaissance d'entreprise**. Elle centralise la documentation et les connaissances d'une organisation pour les rendre structurées, reliées, fiables et exploitables par des humains et des agents IA. Le produit s'inspire de Confluence, Notion et Obsidian, avec pour objectif d'évoluer progressivement vers une mémoire d'entreprise comprenant : documentation collaborative Markdown, liens et relations, recherche classique puis sémantique, entités, permissions, sources et provenance, historique, gouvernance, IA, agents, API/MCP et intégrations métier.
+Mnemosys is an enterprise memory and knowledge platform. It centralizes an organization's documentation and knowledge so that they remain structured, connected, reliable, portable, and usable by both people and AI agents. The product draws inspiration from Confluence, Notion, and Obsidian. Its current focus is a fast and pleasant browser-based Markdown documentation experience backed by files owned by the user.
 
-## Philosophie
+## Implemented features
 
-Développer **incrémentalement**. Chaque étape doit produire un produit fonctionnel avant d'ajouter la suivante. Privilégier la simplicité, éviter la sur-architecture, les abstractions prématurées et les microservices inutiles. Ne pas implémenter les fonctionnalités futures avant qu'elles soient nécessaires. Le produit doit d'abord être rapide, simple et agréable pour écrire et consulter de la documentation.
+- A filesystem-backed Markdown vault with a configurable storage location and no database.
+- A nested page and folder tree with create, read, edit, rename, move, drag-and-drop, and recursive delete operations.
+- A Markdown editor with preview mode, autosave, undo/redo history, formatting tools, image upload, and drag-and-drop media insertion.
+- YAML-style frontmatter containing a stable immutable UUID, name, description, and page type for every page. Existing pages receive an ID automatically, and duplicate IDs are repaired at startup.
+- Four built-in page types: General, Business documentation, Technical documentation, and Incident documentation.
+- Custom page types and graph colors managed from application settings and persisted in `config/config.toml`.
+- A knowledge graph showing folder hierarchy and explicit Obsidian-style `[[wiki links]]`, with search, filters, zoom, layout controls, and page-type colors.
+- Stable links using `[[id:<uuid>]]` or `[[<uuid>]]`, so references survive page renames and moves.
+- Backlinks and navigation through wiki links.
+- A dashboard with space browsing and title/path filtering.
+- A right-side, scrollable settings drawer for page types and vault location.
+- An English-only interface.
+- A REST API for pages, folders, graph data, application settings, storage browsing, and media.
+- Backend protections for path traversal, symbolic links, invalid page types, malformed JSON, unsupported images, upload size limits, and concurrent mutations.
+- Backend unit and HTTP integration tests covering document lifecycle, metadata, stable IDs, graph relations, settings, storage, assets, invalid inputs, and concurrent access.
 
-## Stack
+## Current stack
 
-* Backend : Go, librairie standard autant que possible
-* Frontend : React router + TypeScript + Tailwind + shadcn/ui
-* Database : SQLite dans un premier temps
-* Documentation : fichiers Markdown
-* API : HTTP/REST
+- Backend: Go, primarily using the standard library.
+- Frontend: React, React Router, TypeScript, Vite, and project-local CSS.
+- Storage: Markdown files and uploaded media inside `Mnemosys-Vault`.
+- Configuration: TOML in `config/config.toml`.
+- API: HTTP/REST with JSON payloads.
+- Database: none. SQLite is not used by the current application.
 
-La stack peut évoluer si une décision technique apporte un bénéfice significatif.
+## Data layout
 
-## Roadmap
+The location selected by the user is stored in `config/config.toml`. Mnemosys creates a `Mnemosys-Vault` directory within that location and stores the Markdown tree and its media there. Application settings such as page types are also stored in `config/config.toml`. Page metadata is stored directly in each Markdown file's frontmatter.
 
-### 1. Documentation Markdown
+## Quality and security
 
-Construire un Confluence minimaliste dans le navigateur reposant sur des fichiers Markdown. L'utilisateur peut parcourir une arborescence, créer, modifier, supprimer, renommer et déplacer des documents et dossiers, écrire en Markdown et visualiser leur rendu. Pas d'authentification, permissions, IA, recherche sémantique, entités, multi-tenant ou intégrations à cette étape.
+The backend is critical. Every backend feature must have relevant tests before it is considered complete. Tests should cover business logic, errors, edge cases, concurrent access, user input, and unexpected behavior. Use integration tests where appropriate. Treat any security vulnerability, data leak, authorization bypass, injection, data corruption, or critical error as blocking. Never consider a feature complete without checking its error cases and security implications. Backend code must be robust, as deterministic as practical, and maintainable.
 
-### 2. Knowledge base
+Test the frontend when appropriate, while keeping backend reliability and security as the highest priority.
 
-Ajouter les liens entre documents, backlinks, tags, métadonnées Markdown, recherche et navigation entre connaissances.
+## Rules for agents
 
-### 3. Recherche
+1. Understand the existing implementation before changing it.
+2. Implement only what the current task requires.
+3. Prefer the simplest solution that fully satisfies the requirement.
+4. Avoid unnecessary dependencies and premature abstractions.
+5. Always test backend changes.
+6. Never ignore, swallow, or conceal an error.
+7. Preserve existing data and behavior unless the task explicitly changes them.
+8. Verify every feature end to end before considering it complete.
+9. Fix regressions immediately.
+10. Keep the current application stable before expanding its scope.
 
-Ajouter l'indexation, la recherche plein texte, les filtres et le classement des résultats. Préparer l'architecture pour la recherche sémantique future.
+## Code organization
 
-### 4. IA
-
-Ajouter une IA capable de rechercher dans la documentation, répondre avec des sources, résumer les documents et suggérer des liens. Les modifications générées par l'IA doivent rester explicites et contrôlables.
-
-### Évolution future
-
-Ajouter progressivement le knowledge graph (entités, propriétés, relations), la gouvernance (sources, provenance, validation, conflits, obsolescence, audit), les permissions, la mémoire active, les agents IA, MCP/API et les intégrations métier.
-
-## Qualité et sécurité
-
-Le **backend est critique**. Toute fonctionnalité backend doit être accompagnée de tests pertinents avant d'être considérée comme terminée. Tester notamment la logique métier, les erreurs, les cas limites, les accès concurrents, les entrées utilisateur et les comportements inattendus. Les tests d'intégration doivent être utilisés lorsque nécessaire. Toute vulnérabilité de sécurité, fuite de données, contournement d'autorisation, injection, corruption de données ou erreur critique doit être traitée comme bloquante. Ne jamais considérer une fonctionnalité terminée sans avoir vérifié ses cas d'erreur et ses implications de sécurité. Le code backend doit être robuste, déterministe autant que possible et maintenable.
-
-Le frontend sera également testé lorsque nécessaire, mais la priorité initiale est la **fiabilité et la sécurité du backend**.
-
-## Règles pour les agents
-
-1. Comprendre l'existant avant de modifier le code.
-2. Implémenter uniquement le nécessaire pour l'étape courante.
-3. Privilégier la solution la plus simple.
-4. Éviter les dépendances et abstractions inutiles.
-5. Tester systématiquement le backend.
-6. Ne jamais ignorer ou masquer une erreur.
-7. Préserver les données et comportements existants.
-8. Toute fonctionnalité doit fonctionner de bout en bout avant d'être considérée comme terminée.
-9. Corriger les régressions immédiatement.
-10. Ne pas passer à l'étape suivante tant que l'étape actuelle n'est pas stable.
-
-## Organisation du code
-
-```bash
-project/
+```text
+mnemosys/
 ├── apps/
-│   ├── api/
-│   │   └── main.go
-│   └── worker/
-│       └── main.go
+│   └── api/
+│       └── main.go                 # HTTP server entry point
 ├── backend/
-│   ├── documents/
-│   │   ├── handler.go
-│   │   ├── service.go
-│   │   ├── repository.go
-│   │   └── model.go
-│   ├── search/
-│   ├── users/
-│   └── ...
-├── db/
-│   ├── migrations/
-│   └── queries/
+│   └── documents/
+│       ├── config.go               # TOML configuration and page types
+│       ├── handler.go              # REST routes and HTTP validation
+│       ├── handler_test.go         # HTTP integration tests
+│       ├── model.go                # API and domain models
+│       ├── repository.go           # Filesystem, frontmatter, graph, and assets
+│       ├── service.go              # Synchronized application operations
+│       └── service_test.go         # Domain, filesystem, and concurrency tests
+├── config/
+│   └── config.toml                 # Persisted application configuration
 ├── frontend/
+│   ├── public/                     # Browser logo and favicon
 │   └── src/
-│       ├── components/
-│       ├── pages/
-│       ├── features/
-│       └── lib/
-├── tests/
-│   └── e2e/
-├── docker-compose.yml
-├── go.mod
-└── AGENTS.md
+│       ├── components/             # Dialog, tree, graph, link picker, preview
+│       ├── lib/
+│       │   └── api.ts              # Typed REST client
+│       ├── App.tsx                 # Main application and settings UI
+│       ├── index.css               # Application styling
+│       └── main.tsx                # React entry point
+├── assets/                         # Source branding assets
+├── README.md
+└── go.mod
 ```
 
-L'organisation backend est **modulaire par fonctionnalité**. Chaque module regroupe sa logique métier, ses handlers, ses modèles et son accès aux données. Éviter les architectures en couches excessivement abstraites. L'environnement sur lequel tu vas développer est un linux mint sur lequel il y a déjà SQLite d'installé.
+The backend is organized by feature. The current `documents` module keeps its models, HTTP handlers, business operations, filesystem persistence, configuration, graph construction, and tests together. Do not add database layers, workers, services, or modules that the current feature set does not need.

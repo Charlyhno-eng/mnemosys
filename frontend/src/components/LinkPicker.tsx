@@ -24,6 +24,7 @@ function similarity(query: string, candidate: string) {
 }
 
 export function LinkPicker({ nodes, onSelect, onClose }: { nodes: Node[]; onSelect: (node: Node) => void; onClose: () => void }) {
+  const tx = (english: string, _french: string) => english;
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -34,9 +35,9 @@ export function LinkPicker({ nodes, onSelect, onClose }: { nodes: Node[]; onSele
   }, [onClose]);
   const results = useMemo(() => nodes.map((node) => ({ node, score: Math.max(similarity(query, node.name), similarity(query, node.path)) })).filter(({ score }) => score > 4).sort((a, b) => b.score - a.score || a.node.path.localeCompare(b.node.path)).slice(0, 12), [nodes, query]);
 
-  return <><button className="link-picker-scrim" type="button" aria-label="Fermer la recherche de lien" onClick={onClose} /><div className="link-picker" role="dialog" aria-label="Créer un lien interne">
-    <div className="link-picker-search"><span>⌕</span><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher approximativement une page…" /></div>
-    <div className="link-picker-results">{results.length ? results.map(({ node }) => <button type="button" key={node.path} onClick={() => onSelect(node)}><span className={node.type}>{node.type === "directory" ? <Icons.folder /> : <Icons.file />}</span><span><strong>{node.name.replace(/\.md$/, "")}</strong><small>{node.path}</small></span><b>↵</b></button>) : <div className="link-picker-empty">Aucune page ou dossier correspondant.</div>}</div>
-    <div className="link-picker-help"><code>[[page]]</code><span>Recherche floue sur le nom et le chemin</span></div>
+  return <><button className="link-picker-scrim" type="button" aria-label={tx("Close link search", "Fermer la recherche de lien")} onClick={onClose} /><div className="link-picker" role="dialog" aria-label={tx("Create an internal link", "Créer un lien interne")}>
+    <div className="link-picker-search"><span>⌕</span><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Search approximately for a page…", "Rechercher approximativement une page…")} /></div>
+    <div className="link-picker-results">{results.length ? results.map(({ node }) => <button type="button" key={node.path} onClick={() => onSelect(node)}><span className={node.type}>{node.type === "directory" ? <Icons.folder /> : <Icons.file />}</span><span><strong>{node.name.replace(/\.md$/, "")}</strong><small>{node.path}</small></span><b>↵</b></button>) : <div className="link-picker-empty">{tx("No matching page or folder.", "Aucune page ou dossier correspondant.")}</div>}</div>
+    <div className="link-picker-help"><code>[[page]]</code><span>{tx("Fuzzy search by name and path", "Recherche floue sur le nom et le chemin")}</span></div>
   </div></>;
 }

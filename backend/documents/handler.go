@@ -36,6 +36,21 @@ func NewHandler(service *Service) http.Handler {
 	mux.HandleFunc("GET /api/settings/storage", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, service.Storage())
 	})
+	mux.HandleFunc("GET /api/settings/application", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, service.ApplicationSettings())
+	})
+	mux.HandleFunc("PUT /api/settings/application", func(w http.ResponseWriter, r *http.Request) {
+		var input ApplicationSettingsInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		settings, err := service.ConfigureApplication(input)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	})
 	mux.HandleFunc("PUT /api/settings/storage", func(w http.ResponseWriter, r *http.Request) {
 		var input StorageInput
 		if !decodeJSON(w, r, &input) {
@@ -173,7 +188,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, ErrAlreadyExists):
 		status = http.StatusConflict
-	case errors.Is(err, ErrInvalidPath), errors.Is(err, ErrInvalidType), errors.Is(err, ErrInvalidAsset):
+	case errors.Is(err, ErrInvalidPath), errors.Is(err, ErrInvalidType), errors.Is(err, ErrInvalidPageType), errors.Is(err, ErrInvalidSettings), errors.Is(err, ErrInvalidAsset):
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})

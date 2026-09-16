@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Graph, GraphNode } from "../lib/api";
+import type { Graph, GraphNode, PageTypeDefinition } from "../lib/api";
+import { Icons } from "./Icons";
 
 type SimNode = GraphNode & { x: number; y: number; vx: number; vy: number };
 type View = { x: number; y: number; scale: number };
+
+function nodeColor(node: GraphNode, pageTypes: PageTypeDefinition[]) {
+  if (node.type === "directory") return { fill: "#e0aa5c", stroke: "#ffe0a6" };
+  const fill = pageTypes.find((type) => type.id === node.pageType)?.color ?? pageTypes[0]?.color ?? "#62a6e8";
+  return { fill, stroke: `${fill}dd` };
+}
 
 function normalize(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase().replace(/\.md$/, "");
@@ -30,16 +37,21 @@ function seededPosition(id: string, index: number, total: number) {
   return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
 }
 
-export function KnowledgeGraph({ graph, onOpen }: { graph: Graph; onOpen: (node: GraphNode) => void }) {
+export function KnowledgeGraph({ graph, pageTypes, onOpen }: { graph: Graph; pageTypes: PageTypeDefinition[]; onOpen: (node: GraphNode) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, scale: 1 });
-  const optionsRef = useRef({ query: "", folders: true, documents: true });
+  const optionsRef = useRef({ query: "", folders: true, documents: true, hierarchy: true, links: true, labels: "auto", nodeSize: 1 });
   const openRef = useRef(onOpen);
   const [query, setQuery] = useState("");
   const [folders, setFolders] = useState(true);
   const [documents, setDocuments] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [hierarchy, setHierarchy] = useState(true);
+  const [links, setLinks] = useState(true);
+  const [labels, setLabels] = useState<"auto" | "always" | "hover">("auto");
+  const [nodeSize, setNodeSize] = useState(1);
   openRef.current = onOpen;
-  optionsRef.current = { query, folders, documents };
+  optionsRef.current = { query, folders, documents, hierarchy, links, labels, nodeSize };
 
   const searchResults = useMemo(() => query.trim() ? graph.nodes.map((node) => ({ node, score: score(query, node) })).filter((result) => result.score > 0).sort((a, b) => b.score - a.score || a.node.name.localeCompare(b.node.name)).slice(0, 8) : [], [graph.nodes, query]);
 
@@ -105,17 +117,20 @@ export function KnowledgeGraph({ graph, onOpen }: { graph: Graph; onOpen: (node:
       const activeQuery = optionsRef.current.query.trim();
       for (const edge of edges) {
         const source = edge.sourceNode!; const target = edge.targetNode!; if (!visible(source) || !visible(target)) continue;
+        if ((edge.type === "hierarchy" && !optionsRef.current.hierarchy) || (edge.type === "link" && !optionsRef.current.links)) continue;
         context.beginPath(); context.moveTo(source.x, source.y); context.lineTo(target.x, target.y);
         context.strokeStyle = edge.type === "link" ? "rgba(151,125,224,.7)" : "rgba(79,105,130,.44)";
         context.lineWidth = (edge.type === "link" ? 1.35 : .8) / view.scale; context.setLineDash(edge.type === "link" ? [5 / view.scale, 4 / view.scale] : []); context.stroke();
       }
       context.setLineDash([]);
       for (const node of nodes) {
-        if (!visible(node)) continue; const matches = !activeQuery || score(activeQuery, node) > 0; const radius = node.type === "directory" ? 6.5 : 4.2;
+        if (!visible(node)) continue; const matches = !activeQuery || score(activeQuery, node) > 0; const radius = (node.type === "directory" ? 6.5 : 4.2) * optionsRef.current.nodeSize;
+        const colors = nodeColor(node, pageTypes);
         context.globalAlpha = matches ? 1 : .14; context.beginPath(); context.arc(node.x, node.y, hovered === node ? radius * 1.55 : radius, 0, Math.PI * 2);
-        context.fillStyle = node.type === "directory" ? "#e0aa5c" : "#62a6e8"; context.fill();
-        if (hovered === node || (activeQuery && matches)) { context.strokeStyle = node.type === "directory" ? "#ffe0a6" : "#b7ddff"; context.lineWidth = 2 / view.scale; context.stroke(); }
-        if (hovered === node || (activeQuery && matches) || view.scale > .72) {
+        context.fillStyle = colors.fill; context.fill();
+        if (hovered === node || (activeQuery && matches)) { context.strokeStyle = colors.stroke; context.lineWidth = 2 / view.scale; context.stroke(); }
+        const showLabel = optionsRef.current.labels === "always" || hovered === node || (activeQuery && matches) || (optionsRef.current.labels === "auto" && view.scale > .72);
+        if (showLabel) {
           context.font = `${hovered === node ? 600 : 500} ${Math.max(9, 11 / Math.max(.8, view.scale))}px Inter, sans-serif`; context.fillStyle = "#c5d3e1"; context.textBaseline = "middle"; context.fillText(node.name, node.x + radius + 5 / view.scale, node.y);
         }
       }
@@ -140,20 +155,22 @@ export function KnowledgeGraph({ graph, onOpen }: { graph: Graph; onOpen: (node:
     };
     frame = requestAnimationFrame(draw);
     return () => { cancelAnimationFrame(frame); observer.disconnect(); canvas.onpointerdown = null; canvas.onpointermove = null; canvas.onpointerup = null; canvas.onpointerleave = null; canvas.onwheel = null; };
-  }, [graph]);
+  }, [graph, pageTypes]);
 
   const zoom = (factor: number) => { viewRef.current.scale = Math.min(3, Math.max(.2, viewRef.current.scale * factor)); };
   const recenter = () => { const canvas = canvasRef.current; if (canvas) viewRef.current = { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2, scale: 1 }; };
-  if (!graph.nodes.length) return <div className="graph-empty"><strong>Le graphe est vide</strong><span>Créez un dossier ou une page pour faire apparaître ses relations.</span></div>;
+  const tx = (english: string, _french: string) => english;
+  if (!graph.nodes.length) return <div className="graph-empty"><strong>{tx("The graph is empty", "Le graphe est vide")}</strong><span>{tx("Create a folder or page to display its relationships.", "Créez un dossier ou une page pour faire apparaître ses relations.")}</span></div>;
 
   return <div className="graph-page">
-    <div className="graph-heading"><div><span className="eyebrow">CONNEXIONS</span><h1>Graphe des connaissances</h1><p>Déplacez les nœuds, zoomez et recherchez une page dans l’ensemble du vault.</p></div><div className="graph-legend"><span><i className="folder" />Dossier</span><span><i className="document" />Page</span><span><i className="link" />Lien explicite</span></div></div>
+    <div className="graph-heading"><div><span className="eyebrow">{tx("CONNECTIONS", "CONNEXIONS")}</span><h1>{tx("Knowledge graph", "Graphe des connaissances")}</h1><p>{tx("Move nodes, zoom and search throughout the vault.", "Déplacez les nœuds, zoomez et recherchez une page dans l’ensemble du vault.")}</p></div><div className="graph-legend"><span><i className="folder" />{tx("Folder", "Dossier")}</span>{pageTypes.map((type) => <span key={type.id}><i style={{ background: type.color }} />{type.label}</span>)}<span><i className="link" />{tx("Link", "Lien")}</span></div></div>
     <div className="graph-canvas">
-      <canvas ref={canvasRef} aria-label="Graphe interactif des dossiers et documents" />
-      <div className="graph-tools"><div className="graph-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher un nœud…" />{query && <button onClick={() => setQuery("")} aria-label="Effacer">×</button>}</div><div className="graph-filters"><button className={folders ? "active" : ""} onClick={() => setFolders((value) => !value)}><i className="folder" />Dossiers</button><button className={documents ? "active" : ""} onClick={() => setDocuments((value) => !value)}><i className="document" />Pages</button></div></div>
-      {query && <div className="graph-search-results">{searchResults.length ? searchResults.map(({ node }) => <button key={node.id} onClick={() => onOpen(node)}><i className={node.type} /><span><strong>{node.name}</strong><small>{node.id}</small></span></button>) : <span>Aucun résultat.</span>}</div>}
-      <div className="graph-zoom"><button onClick={() => zoom(1.2)} aria-label="Zoomer">+</button><button onClick={() => zoom(1 / 1.2)} aria-label="Dézoomer">−</button><button onClick={recenter} aria-label="Recentrer">◎</button></div>
-      <div className="graph-count">{graph.nodes.length} nœuds · {graph.edges.length} connexions</div>
+      <canvas ref={canvasRef} aria-label="Interactive graph of folders and documents" />
+      <div className="graph-tools"><div className="graph-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Search for a node…", "Rechercher un nœud…")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}>×</button>}</div><div className="graph-filters"><button className={folders ? "active" : ""} onClick={() => setFolders((value) => !value)}><i className="folder" />{tx("Folders", "Dossiers")}</button><button className={documents ? "active" : ""} onClick={() => setDocuments((value) => !value)}><i className="document" />{tx("Pages", "Pages")}</button><button className={settingsOpen ? "active graph-settings-button" : "graph-settings-button"} onClick={() => setSettingsOpen((open) => !open)} title={tx("Graph settings", "Paramètres du graphe")}><Icons.settings /></button></div></div>
+      {settingsOpen && <div className="graph-settings-panel"><strong>{tx("Graph settings", "Paramètres du graphe")}</strong><label><span>{tx("Labels", "Étiquettes")}</span><select value={labels} onChange={(event) => setLabels(event.target.value as typeof labels)}><option value="auto">{tx("Automatic", "Automatiques")}</option><option value="always">{tx("Always", "Toujours")}</option><option value="hover">{tx("On hover", "Au survol")}</option></select></label><label><span>{tx("Node size", "Taille des nœuds")}</span><input type="range" min="0.7" max="1.8" step="0.1" value={nodeSize} onChange={(event) => setNodeSize(Number(event.target.value))} /></label><label className="graph-check"><input type="checkbox" checked={hierarchy} onChange={(event) => setHierarchy(event.target.checked)} />{tx("Folder hierarchy", "Hiérarchie des dossiers")}</label><label className="graph-check"><input type="checkbox" checked={links} onChange={(event) => setLinks(event.target.checked)} />{tx("Explicit links", "Liens explicites")}</label></div>}
+      {query && <div className="graph-search-results">{searchResults.length ? searchResults.map(({ node }) => <button key={node.id} onClick={() => onOpen(node)}><i style={{ background: node.type === "directory" ? "#e0aa5c" : nodeColor(node, pageTypes).fill }} /><span><strong>{node.name}</strong><small>{node.id}</small></span></button>) : <span>{tx("No results.", "Aucun résultat.")}</span>}</div>}
+      <div className="graph-zoom"><button onClick={() => zoom(1.2)} aria-label={tx("Zoom in", "Zoomer")}>+</button><button onClick={() => zoom(1 / 1.2)} aria-label={tx("Zoom out", "Dézoomer")}>−</button><button onClick={recenter} aria-label={tx("Recenter graph", "Recentrer le graphe")} title={tx("Recenter graph", "Recentrer le graphe")}>⌂</button></div>
+      <div className="graph-count">{graph.nodes.length} {tx("nodes", "nœuds")} · {graph.edges.length} {tx("connections", "connexions")}</div>
     </div>
   </div>;
 }

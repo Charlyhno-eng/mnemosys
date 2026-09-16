@@ -5,10 +5,13 @@ export type Node = {
   children?: Node[];
 };
 
-export type Document = { path: string; content: string };
+export type PageType = string;
+export type PageTypeDefinition = { id: PageType; label: string; description: string; color: string; builtIn: boolean };
+export type ApplicationSettings = { pageTypes: PageTypeDefinition[] };
+export type Document = { id: string; path: string; content: string; pageType: PageType; updatedAt: string };
 export type StorageSettings = { path: string; vaultPath: string; configured: boolean };
 export type DirectoryListing = { path: string; parent?: string; directories: Array<{ name: string; path: string }> };
-export type GraphNode = { id: string; name: string; type: Node["type"] };
+export type GraphNode = { id: string; documentId?: string; name: string; type: Node["type"]; pageType?: PageType };
 export type GraphEdge = { source: string; target: string; type: "hierarchy" | "link" };
 export type Graph = { nodes: GraphNode[]; edges: GraphEdge[] };
 
@@ -31,8 +34,8 @@ export const api = {
   tree: () => request<Node[]>("/api/documents/tree"),
   graph: () => request<Graph>("/api/documents/graph"),
   get: (path: string) => request<Document>(`/api/documents/content?path=${encodeURIComponent(path)}`),
-  create: (path: string, type: "directory" | "document", content = "") =>
-    request<{ path: string }>("/api/documents", { method: "POST", ...json({ path, type, content }) }),
+  create: (path: string, type: "directory" | "document", content = "", pageType?: PageType) =>
+    request<{ path: string }>("/api/documents", { method: "POST", ...json({ path, type, content, ...(pageType ? { pageType } : {}) }) }),
   update: (path: string, content: string) =>
     request<{ path: string }>("/api/documents", { method: "PUT", ...json({ path, content }) }),
   move: (path: string, newPath: string) =>
@@ -44,6 +47,8 @@ export const api = {
     return request<{ url: string }>("/api/assets", { method: "POST", body });
   },
   storage: () => request<StorageSettings>("/api/settings/storage"),
+  applicationSettings: () => request<ApplicationSettings>("/api/settings/application"),
+  configureApplication: (settings: ApplicationSettings) => request<ApplicationSettings>("/api/settings/application", { method: "PUT", ...json(settings) }),
   configureStorage: (path: string) => request<StorageSettings>("/api/settings/storage", { method: "PUT", ...json({ path }) }),
   directories: (path?: string) => request<DirectoryListing>(`/api/settings/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
 };

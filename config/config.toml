@@ -3,3 +3,23 @@
 
 [storage]
 path = "/home/charly/Téléchargements"
+
+[page_types.general]
+label = "General"
+description = "General-purpose documentation."
+color = "#62a6e8"
+
+[page_types.business]
+label = "Business documentation"
+description = "Business rules, processes and functional knowledge."
+color = "#4bc49a"
+
+[page_types.technical]
+label = "Technical documentation"
+description = "Architecture, implementation, APIs and operations."
+color = "#a78bfa"
+
+[page_types.incident]
+label = "Incident documentation"
+description = "Timeline, impact, root cause and corrective actions."
+color = "#f16f78"

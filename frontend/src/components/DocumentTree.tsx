@@ -13,6 +13,7 @@ type Props = {
 };
 
 export function DocumentTree({ nodes, selectedPath, onSelect, onAction, onMove }: Props) {
+  const tx = (english: string, _french: string) => english;
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [menuPath, setMenuPath] = useState<string | null>(null);
   const [dropPath, setDropPath] = useState<string | null>(null);
@@ -55,18 +56,18 @@ export function DocumentTree({ nodes, selectedPath, onSelect, onAction, onMove }
             {folder ? <Icons.folder className="tree-icon folder-icon" /> : <Icons.file className="tree-icon file-icon" />}
             <span className="tree-label">{folder ? node.name : node.name.replace(/\.md$/, "")}</span>
           </button>
-          <button className="icon-button tree-more" type="button" onClick={() => setMenuPath(menuPath === node.path ? null : node.path)} aria-label={`Actions pour ${node.name}`} aria-expanded={menuPath === node.path}><Icons.more /></button>
+          <button className="icon-button tree-more" type="button" onClick={() => setMenuPath(menuPath === node.path ? null : node.path)} aria-label={`${tx("Actions for", "Actions pour")} ${node.name}`} aria-expanded={menuPath === node.path}><Icons.more /></button>
           {menuPath === node.path && <>
-            <button className="menu-scrim" type="button" aria-label="Fermer le menu" onClick={() => setMenuPath(null)} />
+            <button className="menu-scrim" type="button" aria-label={tx("Close menu", "Fermer le menu")} onClick={() => setMenuPath(null)} />
             <div className="context-menu">
               {folder && <>
-                <button type="button" onClick={() => { setMenuPath(null); onAction(node, "new-document"); }}><Icons.file />Nouveau document</button>
-                <button type="button" onClick={() => { setMenuPath(null); onAction(node, "new-directory"); }}><Icons.folder />Nouveau dossier</button>
+                <button type="button" onClick={() => { setMenuPath(null); onAction(node, "new-document"); }}><Icons.file />{tx("New document", "Nouveau document")}</button>
+                <button type="button" onClick={() => { setMenuPath(null); onAction(node, "new-directory"); }}><Icons.folder />{tx("New folder", "Nouveau dossier")}</button>
                 <span className="menu-separator" />
               </>}
-              <button type="button" onClick={() => { setMenuPath(null); onAction(node, "rename"); }}><Icons.edit />Renommer</button>
-              <button type="button" onClick={() => { setMenuPath(null); onAction(node, "move"); }}><Icons.move />Déplacer</button>
-              <button className="destructive" type="button" onClick={() => { setMenuPath(null); onAction(node, "delete"); }}><Icons.trash />Supprimer</button>
+              <button type="button" onClick={() => { setMenuPath(null); onAction(node, "rename"); }}><Icons.edit />{tx("Rename", "Renommer")}</button>
+              <button type="button" onClick={() => { setMenuPath(null); onAction(node, "move"); }}><Icons.move />{tx("Move", "Déplacer")}</button>
+              <button className="destructive" type="button" onClick={() => { setMenuPath(null); onAction(node, "delete"); }}><Icons.trash />{tx("Delete", "Supprimer")}</button>
             </div>
           </>}
         </div>
@@ -75,6 +76,6 @@ export function DocumentTree({ nodes, selectedPath, onSelect, onAction, onMove }
     })}</ul>;
   }
 
-  if (nodes.length === 0) return <div className="tree-empty"><Icons.file /><p>Aucun document</p><span>Créez votre première page</span></div>;
+  if (nodes.length === 0) return <div className="tree-empty"><Icons.file /><p>{tx("No documents", "Aucun document")}</p><span>{tx("Create your first page", "Créez votre première page")}</span></div>;
   return render(nodes);
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestService(t *testing.T) (*Service, string) {
@@ -57,9 +58,8 @@ func TestDocumentsReceiveDefaultProperties(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "---\nname: \"Product Guide\"\ndescription: \"\"\n---\n\n# Guide"
-	if document.Content != want {
-		t.Fatalf("content = %q, want %q", document.Content, want)
+	if document.ID == "" || !frontmatterIDPattern.MatchString(document.Content) || !strings.Contains(document.Content, `name: "Product Guide"`) || !strings.Contains(document.Content, `description: ""`) || !strings.Contains(document.Content, `page_type: "general"`) || !strings.HasSuffix(document.Content, "# Guide") {
+		t.Fatalf("document = %#v", document)
 	}
 
 	content := "---\nname: \"Custom\"\n---\n\nText"
@@ -69,6 +69,140 @@ func TestDocumentsReceiveDefaultProperties(t *testing.T) {
 	document, err = service.Get("Product Guide.md")
 	if err != nil || !strings.Contains(document.Content, "description: \"\"") || strings.Count(document.Content, "name:") != 1 {
 		t.Fatalf("updated properties = %q, %v", document.Content, err)
+	}
+}
+
+func TestDocumentIDIsImmutableAcrossWritesAndMoves(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "before.md", Type: "document", Content: "# Before"}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Get("before.md")
+	if err != nil || created.ID == "" {
+		t.Fatalf("created document = %#v, %v", created, err)
+	}
+	content := "---\nid: \"00000000-0000-4000-8000-000000000000\"\n---\n\n# Changed"
+	if err := service.Update(UpdateInput{Path: "before.md", Content: &content}); err != nil {
+		t.Fatal(err)
+	}
+	destination := "after.md"
+	if err := service.Update(UpdateInput{Path: "before.md", NewPath: &destination}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := service.Get(destination)
+	if err != nil || moved.ID != created.ID || !strings.Contains(moved.Content, `id: "`+created.ID+`"`) {
+		t.Fatalf("moved document = %#v, original ID = %q, error = %v", moved, created.ID, err)
+	}
+}
+
+func TestExistingDocumentsReceiveUniqueStableIDs(t *testing.T) {
+	root := t.TempDir()
+	duplicateID := "11111111-1111-4111-8111-111111111111"
+	legacyDocuments := map[string]string{
+		"one.md":   "---\nid: \"" + duplicateID + "\"\n---\n\n# One",
+		"two.md":   "---\nid: \"" + duplicateID + "\"\n---\n\n# Two",
+		"three.md": "# Missing ID",
+	}
+	for name, content := range legacyDocuments {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := NewService(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := service.Get("one.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := service.Get("two.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	three, err := service.Get("three.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.ID == "" || two.ID == "" || three.ID == "" || one.ID == two.ID || one.ID == three.ID || two.ID == three.ID {
+		t.Fatalf("backfilled IDs = %q, %q and %q", one.ID, two.ID, three.ID)
+	}
+	info, err := os.Stat(filepath.Join(root, "three.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("backfill changed file mode to %v", info.Mode().Perm())
+	}
+	reloaded, err := NewService(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oneAgain, err := reloaded.Get("one.md")
+	if err != nil || oneAgain.ID != one.ID {
+		t.Fatalf("reloaded ID = %q, want %q, error = %v", oneAgain.ID, one.ID, err)
+	}
+}
+
+func TestDocumentPageTypeAndUpdatedAt(t *testing.T) {
+	service, root := newTestService(t)
+	if err := service.Create(CreateInput{Path: "system.md", Type: "document", PageType: "technical", Content: "# System"}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("system.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.PageType != "technical" || !strings.Contains(document.Content, `page_type: "technical"`) {
+		t.Fatalf("document = %#v", document)
+	}
+	if document.UpdatedAt.IsZero() {
+		t.Fatal("updatedAt must be populated")
+	}
+	past := document.UpdatedAt.Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "system.md"), past, past); err != nil {
+		t.Fatal(err)
+	}
+	updatedContent := document.Content + "\nChanged"
+	if err := service.Update(UpdateInput{Path: "system.md", Content: &updatedContent}); err != nil {
+		t.Fatal(err)
+	}
+	document, err = service.Get("system.md")
+	if err != nil || !document.UpdatedAt.After(past) {
+		t.Fatalf("updated document = %#v, %v", document, err)
+	}
+	graph, err := service.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Nodes) != 1 || graph.Nodes[0].PageType != "technical" {
+		t.Fatalf("graph nodes = %#v", graph.Nodes)
+	}
+}
+
+func TestRejectsInvalidPageType(t *testing.T) {
+	service, root := newTestService(t)
+	err := service.Create(CreateInput{Path: "bad.md", Type: "document", PageType: "unknown"})
+	if !errors.Is(err, ErrInvalidPageType) {
+		t.Fatalf("error = %v, want invalid page type", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "bad.md")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid document was created: %v", statErr)
+	}
+}
+
+func TestCreatePageTypeOverridesContentAndKeepsRequiredProperties(t *testing.T) {
+	service, _ := newTestService(t)
+	content := "---\npage_type: \"incident\"\n---\n\n# System"
+	if err := service.Create(CreateInput{Path: "system.md", Type: "document", PageType: "technical", Content: content}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("system.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.PageType != "technical" || !strings.Contains(document.Content, `page_type: "technical"`) || !strings.Contains(document.Content, `name: "system"`) || !strings.Contains(document.Content, `description: ""`) {
+		t.Fatalf("document = %#v", document)
 	}
 }
 
@@ -109,6 +243,54 @@ func TestGraphContainsHierarchyAndWikiLinks(t *testing.T) {
 			t.Errorf("missing edge %q in %#v", edge, graph.Edges)
 		}
 	}
+}
+
+func TestGraphDoesNotConnectRootEntries(t *testing.T) {
+	service, _ := newTestService(t)
+	for _, input := range []CreateInput{
+		{Path: "Product", Type: "directory"},
+		{Path: "Engineering", Type: "directory"},
+		{Path: "home.md", Type: "document"},
+	} {
+		if err := service.Create(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	graph, err := service.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Edges) != 0 {
+		t.Fatalf("root entries must not be connected: %#v", graph.Edges)
+	}
+}
+
+func TestGraphResolvesStableIDLinksAfterRename(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "target.md", Type: "document"}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := service.Get("target.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed := "renamed.md"
+	if err := service.Update(UpdateInput{Path: "target.md", NewPath: &renamed}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "source.md", Type: "document", Content: "[[id:" + target.ID + "]]"}); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := service.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range graph.Edges {
+		if edge.Type == "link" && edge.Source == "source.md" && edge.Target == renamed {
+			return
+		}
+	}
+	t.Fatalf("stable ID link not resolved after rename: %#v", graph.Edges)
 }
 
 func TestRejectsUnsafePaths(t *testing.T) {
@@ -242,6 +424,45 @@ func TestConfigurableStoragePersistsAndReloads(t *testing.T) {
 	document, err := reloaded.Get("persisted.md")
 	if err != nil || !strings.HasSuffix(document.Content, "\n\nsaved") {
 		t.Fatalf("reloaded document = %#v, %v", document, err)
+	}
+}
+
+func TestApplicationSettingsPersistAndAllowCustomPageType(t *testing.T) {
+	base := t.TempDir()
+	configPath := filepath.Join(base, "config.toml")
+	service, err := NewConfigurableService(filepath.Join(base, "documents"), configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := append(defaultPageTypes(), PageTypeDefinition{ID: "ops-runbook", Label: "Runbook", Description: "Operations", Color: "#123abc"})
+	settings, err := service.ConfigureApplication(ApplicationSettingsInput{PageTypes: types})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPageType(settings.PageTypes, "ops-runbook") {
+		t.Fatalf("settings = %#v", settings)
+	}
+	if err := service.Create(CreateInput{Path: "ops.md", Type: "document", PageType: "ops-runbook"}); err != nil {
+		t.Fatalf("create custom page type: %v", err)
+	}
+	document, err := service.Get("ops.md")
+	if err != nil || document.PageType != "ops-runbook" {
+		t.Fatalf("custom page type document = %#v, %v", document, err)
+	}
+	reloaded, err := NewConfigurableService(filepath.Join(base, "other-documents"), configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.ApplicationSettings(); !containsPageType(got.PageTypes, "ops-runbook") {
+		t.Fatalf("reloaded settings = %#v", got)
+	}
+}
+
+func TestApplicationSettingsRejectInvalidCustomType(t *testing.T) {
+	service, _ := newTestService(t)
+	types := append(defaultPageTypes(), PageTypeDefinition{ID: "../bad", Label: "Bad", Color: "#123456"})
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{PageTypes: types}); !errors.Is(err, ErrInvalidSettings) {
+		t.Fatalf("error = %v, want invalid settings", err)
 	}
 }
 

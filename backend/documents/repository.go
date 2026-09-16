@@ -16,11 +16,13 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("document not found")
-	ErrAlreadyExists = errors.New("a document or folder already exists at this path")
-	ErrInvalidPath   = errors.New("invalid document path")
-	ErrInvalidType   = errors.New("type must be either directory or document")
-	ErrInvalidAsset  = errors.New("only PNG, JPEG, GIF and WebP images are accepted")
+	ErrNotFound        = errors.New("document not found")
+	ErrAlreadyExists   = errors.New("a document or folder already exists at this path")
+	ErrInvalidPath     = errors.New("invalid document path")
+	ErrInvalidType     = errors.New("type must be either directory or document")
+	ErrInvalidPageType = errors.New("invalid page type")
+	ErrInvalidSettings = errors.New("invalid application settings")
+	ErrInvalidAsset    = errors.New("only PNG, JPEG, GIF and WebP images are accepted")
 )
 
 type repository struct {
@@ -32,6 +34,51 @@ var assetExtensions = map[string]string{
 }
 
 var wikiLinkPattern = regexp.MustCompile(`\[\[([^\]\n]+)\]\]`)
+var frontmatterPageTypePattern = regexp.MustCompile(`(?m)^page_type\s*:\s*["']?([a-z][a-z0-9_-]{0,31})["']?\s*$`)
+var frontmatterPageTypePropertyPattern = regexp.MustCompile(`(?m)^page_type\s*:.*$`)
+var frontmatterIDPattern = regexp.MustCompile(`(?m)^id\s*:\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})["']?\s*$`)
+var frontmatterIDPropertyPattern = regexp.MustCompile(`(?m)^id\s*:.*$`)
+
+func pageTypeFromContent(content string) PageType {
+	if !strings.HasPrefix(content, "---\n") {
+		return PageTypeGeneral
+	}
+	closing := strings.Index(content[4:], "\n---")
+	if closing < 0 {
+		return PageTypeGeneral
+	}
+	match := frontmatterPageTypePattern.FindStringSubmatch(content[4 : closing+4])
+	if len(match) != 2 {
+		return PageTypeGeneral
+	}
+	return PageType(match[1])
+}
+
+func documentIDFromContent(content string) string {
+	if !strings.HasPrefix(content, "---\n") {
+		return ""
+	}
+	closing := strings.Index(content[4:], "\n---")
+	if closing < 0 {
+		return ""
+	}
+	match := frontmatterIDPattern.FindStringSubmatch(content[4 : closing+4])
+	if len(match) != 2 {
+		return ""
+	}
+	return match[1]
+}
+
+func newDocumentID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate document ID: %w", err)
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	encoded := hex.EncodeToString(value)
+	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:], nil
+}
 
 // newRepository creates filesystem access rooted at one validated directory.
 func newRepository(root string) (*repository, error) {
@@ -42,7 +89,67 @@ func newRepository(root string) (*repository, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("documents root is not a directory")
 	}
-	return &repository{root: root}, nil
+	repository := &repository{root: root}
+	if err := repository.ensureDocumentIDs(); err != nil {
+		return nil, err
+	}
+	return repository, nil
+}
+
+// ensureDocumentIDs backfills missing or duplicate stable IDs in existing Markdown files.
+func (r *repository) ensureDocumentIDs() error {
+	seen := make(map[string]struct{})
+	return filepath.WalkDir(r.root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("scan documents for stable IDs: %w", walkErr)
+		}
+		if path == r.root {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			if strings.HasPrefix(entry.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".md") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read document while assigning stable ID: %w", err)
+		}
+		documentID := documentIDFromContent(string(content))
+		_, duplicate := seen[documentID]
+		if documentID != "" && !duplicate {
+			seen[documentID] = struct{}{}
+			return nil
+		}
+		documentID, err = newDocumentID()
+		if err != nil {
+			return err
+		}
+		seen[documentID] = struct{}{}
+		relative, err := filepath.Rel(r.root, path)
+		if err != nil {
+			return fmt.Errorf("resolve document path while assigning stable ID: %w", err)
+		}
+		updated := ensureDocumentProperties(filepath.ToSlash(relative), string(content), "", documentID)
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect document while assigning stable ID: %w", err)
+		}
+		if err := os.WriteFile(path, []byte(updated), info.Mode().Perm()); err != nil {
+			return fmt.Errorf("write stable document ID: %w", err)
+		}
+		return nil
+	})
 }
 
 // validatePath accepts only clean relative paths and optionally enforces a Markdown extension.
@@ -126,11 +233,22 @@ func (r *repository) graph() (Graph, error) {
 	visit = func(nodes []Node, parent string) {
 		for _, node := range nodes {
 			graphNode := GraphNode{ID: node.Path, Name: strings.TrimSuffix(node.Name, ".md"), Type: node.Type}
+			if node.Type == "document" {
+				document, err := r.get(node.Path)
+				if err == nil {
+					graphNode.PageType = document.PageType
+					graphNode.DocumentID = document.ID
+				}
+			}
 			graph.Nodes = append(graph.Nodes, graphNode)
 			byPath[node.Path] = graphNode
 			for _, alias := range []string{node.Path, strings.TrimSuffix(node.Path, ".md"), node.Name, strings.TrimSuffix(node.Name, ".md")} {
 				key := strings.ToLower(alias)
 				aliases[key] = append(aliases[key], node.Path)
+			}
+			if graphNode.DocumentID != "" {
+				aliases["id:"+graphNode.DocumentID] = append(aliases["id:"+graphNode.DocumentID], node.Path)
+				aliases[graphNode.DocumentID] = append(aliases[graphNode.DocumentID], node.Path)
 			}
 			if parent != "" {
 				appendGraphEdge(&graph.Edges, edges, parent, node.Path, "hierarchy")
@@ -143,10 +261,6 @@ func (r *repository) graph() (Graph, error) {
 		}
 	}
 	visit(tree, "")
-	for index := 1; index < len(tree); index++ {
-		appendGraphEdge(&graph.Edges, edges, tree[index-1].Path, tree[index].Path, "hierarchy")
-	}
-
 	for _, path := range documents {
 		document, err := r.get(path)
 		if err != nil {
@@ -246,7 +360,7 @@ func (r *repository) get(path string) (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("read document: %w", err)
 	}
-	return Document{Path: path, Content: string(content)}, nil
+	return Document{ID: documentIDFromContent(string(content)), Path: path, Content: string(content), PageType: pageTypeFromContent(string(content)), UpdatedAt: info.ModTime()}, nil
 }
 
 // create adds one document or directory without overwriting existing data.
@@ -272,7 +386,11 @@ func (r *repository) create(input CreateInput) error {
 		}
 		return nil
 	}
-	input.Content = ensureDocumentProperties(input.Path, input.Content)
+	documentID, err := newDocumentID()
+	if err != nil {
+		return err
+	}
+	input.Content = ensureDocumentProperties(input.Path, input.Content, input.PageType, documentID)
 	if err := os.WriteFile(target, []byte(input.Content), 0o644); err != nil {
 		return fmt.Errorf("create document: %w", err)
 	}
@@ -291,17 +409,32 @@ func (r *repository) write(path, content string) error {
 	if err != nil || info.IsDir() {
 		return ErrNotFound
 	}
-	content = ensureDocumentProperties(path, content)
+	existing, err := os.ReadFile(r.absolute(path))
+	if err != nil {
+		return fmt.Errorf("read document identity: %w", err)
+	}
+	documentID := documentIDFromContent(string(existing))
+	if documentID == "" {
+		documentID, err = newDocumentID()
+		if err != nil {
+			return err
+		}
+	}
+	content = ensureDocumentProperties(path, content, "", documentID)
 	if err := os.WriteFile(r.absolute(path), []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write document: %w", err)
 	}
 	return nil
 }
 
-// ensureDocumentProperties adds the required name and description frontmatter fields.
-func ensureDocumentProperties(path, content string) string {
+// ensureDocumentProperties adds the required stable ID, name, description, and page type fields.
+func ensureDocumentProperties(path, content string, requestedPageType PageType, documentID string) string {
 	name := strings.TrimSuffix(filepath.Base(path), ".md")
-	header := "---\nname: " + strconv.Quote(name) + "\ndescription: \"\"\n---\n\n"
+	pageType := requestedPageType
+	if pageType == "" {
+		pageType = PageTypeGeneral
+	}
+	header := "---\nid: " + strconv.Quote(documentID) + "\nname: " + strconv.Quote(name) + "\ndescription: \"\"\npage_type: " + strconv.Quote(string(pageType)) + "\n---\n\n"
 	if !strings.HasPrefix(content, "---\n") {
 		return header + content
 	}
@@ -311,12 +444,28 @@ func ensureDocumentProperties(path, content string) string {
 	}
 	closing += 4
 	frontmatter := content[4:closing]
+	if frontmatterIDPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterIDPropertyPattern.ReplaceAllString(frontmatter, "id: "+strconv.Quote(documentID))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if requestedPageType != "" && frontmatterPageTypePropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterPageTypePropertyPattern.ReplaceAllString(frontmatter, "page_type: "+strconv.Quote(string(requestedPageType)))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
 	missing := ""
+	if !frontmatterIDPropertyPattern.MatchString(frontmatter) {
+		missing += "id: " + strconv.Quote(documentID) + "\n"
+	}
 	if !regexp.MustCompile(`(?m)^name\s*:`).MatchString(frontmatter) {
 		missing += "name: " + strconv.Quote(name) + "\n"
 	}
 	if !regexp.MustCompile(`(?m)^description\s*:`).MatchString(frontmatter) {
 		missing += "description: \"\"\n"
+	}
+	if !frontmatterPageTypePropertyPattern.MatchString(frontmatter) {
+		missing += "page_type: " + strconv.Quote(string(pageType)) + "\n"
 	}
 	if missing == "" {
 		return content

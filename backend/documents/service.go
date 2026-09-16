@@ -1,15 +1,12 @@
 package documents
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -22,6 +19,7 @@ type Service struct {
 	configPath  string
 	storagePath string
 	configured  bool
+	pageTypes   []PageTypeDefinition
 }
 
 // VaultDirectoryName is the application-owned directory created inside a selected location.
@@ -29,7 +27,7 @@ const VaultDirectoryName = "Mnemosys-Vault"
 
 // NewService creates a service with an already confirmed document directory.
 func NewService(root string) (*Service, error) {
-	return newService(root, root, "", true)
+	return newService(root, root, "", true, defaultPageTypes())
 }
 
 // NewConfigurableService creates a service backed by a persisted storage selection.
@@ -38,14 +36,16 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 	root := defaultRoot
 	storagePath := defaultRoot
 	configured := false
+	pageTypes := defaultPageTypes()
 	data, err := os.ReadFile(configPath)
 	if err == nil {
-		path, err := parseStoragePath(data)
+		config, err := parseApplicationConfig(data)
 		if err != nil {
 			return nil, fmt.Errorf("decode application config: %w", err)
 		}
-		if path != "" {
-			storagePath, root, err = prepareVaultRoot(path)
+		pageTypes = config.PageTypes
+		if config.StoragePath != "" {
+			storagePath, root, err = prepareVaultRoot(config.StoragePath)
 			if err != nil {
 				return nil, err
 			}
@@ -54,11 +54,11 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("read application config: %w", err)
 	}
-	return newService(root, storagePath, configPath, configured)
+	return newService(root, storagePath, configPath, configured, pageTypes)
 }
 
 // newService validates the root and constructs the shared service state.
-func newService(root, storagePath, configPath string, configured bool) (*Service, error) {
+func newService(root, storagePath, configPath string, configured bool, pageTypes []PageTypeDefinition) (*Service, error) {
 	root, err := prepareStorageRoot(root)
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func newService(root, storagePath, configPath string, configured bool) (*Service
 	if err != nil {
 		return nil, err
 	}
-	return &Service{repository: repository, configPath: configPath, storagePath: storagePath, configured: configured}, nil
+	return &Service{repository: repository, configPath: configPath, storagePath: storagePath, configured: configured, pageTypes: clonePageTypes(pageTypes)}, nil
 }
 
 // Tree returns the complete visible directory and Markdown document hierarchy.
@@ -95,6 +95,14 @@ func (s *Service) Get(path string) (Document, error) {
 func (s *Service) Create(input CreateInput) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if input.Type == "document" {
+		if input.PageType == "" {
+			input.PageType = PageTypeGeneral
+		}
+		if !containsPageType(s.pageTypes, input.PageType) {
+			return ErrInvalidPageType
+		}
+	}
 	return s.repository.create(input)
 }
 
@@ -145,6 +153,32 @@ func (s *Service) Storage() StorageSettings {
 	return StorageSettings{Path: s.storagePath, VaultPath: s.repository.root, Configured: s.configured}
 }
 
+func (s *Service) ApplicationSettings() ApplicationSettings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return ApplicationSettings{PageTypes: clonePageTypes(s.pageTypes)}
+}
+
+func (s *Service) ConfigureApplication(input ApplicationSettingsInput) (ApplicationSettings, error) {
+	pageTypes, err := validatePageTypes(input.PageTypes)
+	if err != nil {
+		return ApplicationSettings{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.configPath != "" {
+		storagePath := ""
+		if s.configured {
+			storagePath = s.storagePath
+		}
+		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, PageTypes: pageTypes}); err != nil {
+			return ApplicationSettings{}, err
+		}
+	}
+	s.pageTypes = clonePageTypes(pageTypes)
+	return ApplicationSettings{PageTypes: clonePageTypes(s.pageTypes)}, nil
+}
+
 // ConfigureStorage validates, persists, and activates a new document directory.
 func (s *Service) ConfigureStorage(path string) (StorageSettings, error) {
 	storagePath, root, err := prepareVaultRoot(strings.TrimSpace(path))
@@ -160,7 +194,7 @@ func (s *Service) ConfigureStorage(path string) (StorageSettings, error) {
 	defer s.mu.Unlock()
 	settings := StorageSettings{Path: storagePath, VaultPath: root, Configured: true}
 	if s.configPath != "" {
-		if err := persistStoragePath(s.configPath, storagePath); err != nil {
+		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, PageTypes: s.pageTypes}); err != nil {
 			return StorageSettings{}, err
 		}
 	}
@@ -258,83 +292,4 @@ func prepareStorageRoot(path string) (string, error) {
 		return "", fmt.Errorf("remove storage test file: %w", err)
 	}
 	return root, nil
-}
-
-// parseStoragePath reads the storage.path value from the application's TOML file.
-func parseStoragePath(data []byte) (string, error) {
-	section := ""
-	storagePath := ""
-	found := false
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	for lineNumber := 1; scanner.Scan(); lineNumber++ {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.TrimSpace(line[1 : len(line)-1])
-			continue
-		}
-		if section != "storage" {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(key) != "path" {
-			continue
-		}
-		if found {
-			return "", fmt.Errorf("line %d: storage.path is defined more than once", lineNumber)
-		}
-		decoded, err := strconv.Unquote(strings.TrimSpace(value))
-		if err != nil {
-			return "", fmt.Errorf("line %d: storage.path must be a quoted string", lineNumber)
-		}
-		storagePath = strings.TrimSpace(decoded)
-		found = true
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("read config: %w", err)
-	}
-	return storagePath, nil
-}
-
-// persistStoragePath writes the selected directory through a temporary TOML file.
-func persistStoragePath(path, storagePath string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".mnemosys-config-")
-	if err != nil {
-		return fmt.Errorf("create temporary config file: %w", err)
-	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("secure temporary config file: %w", err)
-	}
-	contents := "# Mnemosys application configuration.\n# The selected directory contains the application-owned Mnemosys-Vault folder.\n\n[storage]\npath = " + strconv.Quote(storagePath) + "\n"
-	if _, err := temporary.WriteString(contents); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("encode application config: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("sync application config: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close application config: %w", err)
-	}
-	if err := os.Rename(temporaryName, path); err != nil {
-		if runtime.GOOS != "windows" {
-			return fmt.Errorf("replace application config: %w", err)
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-			return fmt.Errorf("replace application config: %w", err)
-		}
-		if retryErr := os.Rename(temporaryName, path); retryErr != nil {
-			return fmt.Errorf("replace application config: %w", retryErr)
-		}
-	}
-	return nil
 }

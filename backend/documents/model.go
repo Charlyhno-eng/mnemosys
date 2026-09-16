@@ -1,5 +1,27 @@
 package documents
 
+import "time"
+
+type PageType string
+
+const PageTypeGeneral PageType = "general"
+
+type PageTypeDefinition struct {
+	ID          PageType `json:"id"`
+	Label       string   `json:"label"`
+	Description string   `json:"description"`
+	Color       string   `json:"color"`
+	BuiltIn     bool     `json:"builtIn"`
+}
+
+type ApplicationSettings struct {
+	PageTypes []PageTypeDefinition `json:"pageTypes"`
+}
+
+type ApplicationSettingsInput struct {
+	PageTypes []PageTypeDefinition `json:"pageTypes"`
+}
+
 // Node is an entry in the documentation tree.
 type Node struct {
 	Name     string `json:"name"`
@@ -9,14 +31,18 @@ type Node struct {
 }
 
 type Document struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	ID        string    `json:"id"`
+	Path      string    `json:"path"`
+	Content   string    `json:"content"`
+	PageType  PageType  `json:"pageType"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type CreateInput struct {
-	Path    string `json:"path"`
-	Type    string `json:"type"`
-	Content string `json:"content"`
+	Path     string   `json:"path"`
+	Type     string   `json:"type"`
+	PageType PageType `json:"pageType,omitempty"`
+	Content  string   `json:"content"`
 }
 
 type UpdateInput struct {
@@ -58,9 +84,11 @@ type DirectoryListing struct {
 
 // GraphNode represents a document or directory in the knowledge graph.
 type GraphNode struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
+	ID         string   `json:"id"`
+	DocumentID string   `json:"documentId,omitempty"`
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`
+	PageType   PageType `json:"pageType,omitempty"`
 }
 
 // GraphEdge represents either an automatic hierarchy or an explicit wiki link.
