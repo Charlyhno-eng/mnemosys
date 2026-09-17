@@ -6,6 +6,13 @@ type PageType string
 
 const PageTypeGeneral PageType = "general"
 
+type ProfileType string
+
+const (
+	ProfileHuman ProfileType = "human"
+	ProfileAI    ProfileType = "ai"
+)
+
 type PageTypeDefinition struct {
 	ID          PageType `json:"id"`
 	Label       string   `json:"label"`
@@ -15,34 +22,62 @@ type PageTypeDefinition struct {
 }
 
 type ApplicationSettings struct {
-	PageTypes []PageTypeDefinition `json:"pageTypes"`
+	PageTypes     []PageTypeDefinition `json:"pageTypes"`
+	Profile       ProfileSettings      `json:"profile"`
+	AIPermissions Permissions          `json:"aiPermissions"`
 }
 
 type ApplicationSettingsInput struct {
-	PageTypes []PageTypeDefinition `json:"pageTypes"`
+	Profile       ProfileSettings `json:"profile"`
+	AIPermissions Permissions     `json:"aiPermissions"`
+}
+
+type ProfileSettings struct {
+	Type      ProfileType `json:"type"`
+	FirstName string      `json:"firstName"`
+	LastName  string      `json:"lastName"`
+}
+
+type Permissions struct {
+	View   bool `json:"view"`
+	Create bool `json:"create"`
+	Edit   bool `json:"edit"`
+	Delete bool `json:"delete"`
 }
 
 // Node is an entry in the documentation tree.
 type Node struct {
-	Name     string `json:"name"`
-	Path     string `json:"path"`
-	Type     string `json:"type"` // "directory" or "document"
-	Children []Node `json:"children,omitempty"`
+	Name        string      `json:"name"`
+	Path        string      `json:"path"`
+	Type        string      `json:"type"` // "directory" or "document"
+	Children    []Node      `json:"children,omitempty"`
+	Title       string      `json:"title,omitempty"`
+	Description string      `json:"description,omitempty"`
+	PageType    PageType    `json:"pageType,omitempty"`
+	Owner       string      `json:"owner,omitempty"`
+	ModifiedBy  ProfileType `json:"lastModifiedBy,omitempty"`
+	AITouched   bool        `json:"aiTouched,omitempty"`
+	UpdatedAt   time.Time   `json:"updatedAt,omitempty"`
 }
 
 type Document struct {
-	ID        string    `json:"id"`
-	Path      string    `json:"path"`
-	Content   string    `json:"content"`
-	PageType  PageType  `json:"pageType"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID         string      `json:"id"`
+	Path       string      `json:"path"`
+	Content    string      `json:"content"`
+	PageType   PageType    `json:"pageType"`
+	Owner      string      `json:"owner"`
+	ModifiedBy ProfileType `json:"lastModifiedBy"`
+	AITouched  bool        `json:"aiTouched"`
+	UpdatedAt  time.Time   `json:"updatedAt"`
 }
 
 type CreateInput struct {
-	Path     string   `json:"path"`
-	Type     string   `json:"type"`
-	PageType PageType `json:"pageType,omitempty"`
-	Content  string   `json:"content"`
+	Path       string      `json:"path"`
+	Type       string      `json:"type"`
+	PageType   PageType    `json:"pageType,omitempty"`
+	Content    string      `json:"content"`
+	Owner      string      `json:"-"`
+	ModifiedBy ProfileType `json:"-"`
 }
 
 type UpdateInput struct {

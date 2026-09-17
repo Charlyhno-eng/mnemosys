@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -21,12 +22,14 @@ var (
 	ErrInvalidPath     = errors.New("invalid document path")
 	ErrInvalidType     = errors.New("type must be either directory or document")
 	ErrInvalidPageType = errors.New("invalid page type")
+	ErrForbidden       = errors.New("operation is not allowed for the active profile")
 	ErrInvalidSettings = errors.New("invalid application settings")
 	ErrInvalidAsset    = errors.New("only PNG, JPEG, GIF and WebP images are accepted")
 )
 
 type repository struct {
-	root string
+	root         string
+	defaultOwner string
 }
 
 var assetExtensions = map[string]string{
@@ -38,6 +41,35 @@ var frontmatterPageTypePattern = regexp.MustCompile(`(?m)^page_type\s*:\s*["']?(
 var frontmatterPageTypePropertyPattern = regexp.MustCompile(`(?m)^page_type\s*:.*$`)
 var frontmatterIDPattern = regexp.MustCompile(`(?m)^id\s*:\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})["']?\s*$`)
 var frontmatterIDPropertyPattern = regexp.MustCompile(`(?m)^id\s*:.*$`)
+var frontmatterOwnerPattern = regexp.MustCompile(`(?m)^owner\s*:\s*(.*)$`)
+var frontmatterOwnerPropertyPattern = regexp.MustCompile(`(?m)^owner\s*:.*$`)
+var frontmatterModifiedByPattern = regexp.MustCompile(`(?m)^last_modified_by\s*:\s*["']?(human|ai)["']?\s*$`)
+var frontmatterModifiedByPropertyPattern = regexp.MustCompile(`(?m)^last_modified_by\s*:.*$`)
+var frontmatterAITouchedPattern = regexp.MustCompile(`(?m)^ai_touched\s*:\s*(true|false)\s*$`)
+var frontmatterAITouchedPropertyPattern = regexp.MustCompile(`(?m)^ai_touched\s*:.*$`)
+var frontmatterUpdatedAtPattern = regexp.MustCompile(`(?m)^updated_at\s*:\s*["']?([^"'\r\n]+)["']?\s*$`)
+var frontmatterUpdatedAtPropertyPattern = regexp.MustCompile(`(?m)^updated_at\s*:.*$`)
+var frontmatterNamePattern = regexp.MustCompile(`(?m)^name\s*:\s*(.*)$`)
+var frontmatterDescriptionPattern = regexp.MustCompile(`(?m)^description\s*:\s*(.*)$`)
+
+func frontmatterValue(content string, pattern *regexp.Regexp) string {
+	if !strings.HasPrefix(content, "---\n") {
+		return ""
+	}
+	closing := strings.Index(content[4:], "\n---")
+	if closing < 0 {
+		return ""
+	}
+	match := pattern.FindStringSubmatch(content[4 : closing+4])
+	if len(match) != 2 {
+		return ""
+	}
+	value := strings.TrimSpace(match[1])
+	if unquoted, err := strconv.Unquote(value); err == nil {
+		return unquoted
+	}
+	return strings.Trim(value, "'\"")
+}
 
 func pageTypeFromContent(content string) PageType {
 	if !strings.HasPrefix(content, "---\n") {
@@ -69,6 +101,35 @@ func documentIDFromContent(content string) string {
 	return match[1]
 }
 
+func ownerFromContent(content, fallback string) string {
+	owner := strings.TrimSpace(frontmatterValue(content, frontmatterOwnerPattern))
+	if owner == "" || owner == "human" || owner == "ai" {
+		return fallback
+	}
+	return owner
+}
+
+func modifiedByFromContent(content string) ProfileType {
+	value := ProfileType(frontmatterValue(content, frontmatterModifiedByPattern))
+	if value != ProfileHuman && value != ProfileAI {
+		return ProfileHuman
+	}
+	return value
+}
+
+func aiTouchedFromContent(content string) bool {
+	return frontmatterValue(content, frontmatterAITouchedPattern) == "true"
+}
+
+func updatedAtFromContent(content string, fallback time.Time) time.Time {
+	if value := frontmatterValue(content, frontmatterUpdatedAtPattern); value != "" {
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
 func newDocumentID() (string, error) {
 	value := make([]byte, 16)
 	if _, err := rand.Read(value); err != nil {
@@ -81,7 +142,7 @@ func newDocumentID() (string, error) {
 }
 
 // newRepository creates filesystem access rooted at one validated directory.
-func newRepository(root string) (*repository, error) {
+func newRepository(root, defaultOwner string) (*repository, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("stat documents root: %w", err)
@@ -89,7 +150,7 @@ func newRepository(root string) (*repository, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("documents root is not a directory")
 	}
-	repository := &repository{root: root}
+	repository := &repository{root: root, defaultOwner: defaultOwner}
 	if err := repository.ensureDocumentIDs(); err != nil {
 		return nil, err
 	}
@@ -127,26 +188,39 @@ func (r *repository) ensureDocumentIDs() error {
 		}
 		documentID := documentIDFromContent(string(content))
 		_, duplicate := seen[documentID]
-		if documentID != "" && !duplicate {
+		relative, err := filepath.Rel(r.root, path)
+		if err != nil {
+			return fmt.Errorf("resolve document path while assigning metadata: %w", err)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect document while assigning metadata: %w", err)
+		}
+		rawOwner := frontmatterValue(string(content), frontmatterOwnerPattern)
+		owner := ownerFromContent(string(content), r.defaultOwner)
+		metadataComplete := owner != "" && owner != "human" && owner != "ai" && frontmatterModifiedByPattern.MatchString(string(content)) && frontmatterAITouchedPattern.MatchString(string(content)) && frontmatterUpdatedAtPattern.MatchString(string(content))
+		if documentID != "" && !duplicate && metadataComplete {
 			seen[documentID] = struct{}{}
 			return nil
 		}
-		documentID, err = newDocumentID()
-		if err != nil {
-			return err
+		if documentID == "" || duplicate {
+			documentID, err = newDocumentID()
+			if err != nil {
+				return err
+			}
 		}
 		seen[documentID] = struct{}{}
-		relative, err := filepath.Rel(r.root, path)
-		if err != nil {
-			return fmt.Errorf("resolve document path while assigning stable ID: %w", err)
+		actor := modifiedByFromContent(string(content))
+		forceAITouched := aiTouchedFromContent(string(content))
+		if rawOwner == "ai" {
+			actor, forceAITouched = ProfileAI, true
 		}
-		updated := ensureDocumentProperties(filepath.ToSlash(relative), string(content), "", documentID)
-		info, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("inspect document while assigning stable ID: %w", err)
-		}
+		updated := ensureDocumentMetadata(filepath.ToSlash(relative), string(content), "", owner, actor, forceAITouched, documentID, info.ModTime().UTC())
 		if err := os.WriteFile(path, []byte(updated), info.Mode().Perm()); err != nil {
-			return fmt.Errorf("write stable document ID: %w", err)
+			return fmt.Errorf("write document metadata: %w", err)
+		}
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			return fmt.Errorf("restore document modification time: %w", err)
 		}
 		return nil
 	})
@@ -326,7 +400,16 @@ func (r *repository) readDirectory(absolute, relative string) ([]Node, error) {
 			}
 			nodes = append(nodes, Node{Name: entry.Name(), Path: path, Type: "directory", Children: children})
 		} else if strings.HasSuffix(entry.Name(), ".md") {
-			nodes = append(nodes, Node{Name: entry.Name(), Path: path, Type: "document"})
+			content, err := os.ReadFile(filepath.Join(absolute, entry.Name()))
+			if err != nil {
+				return nil, fmt.Errorf("read document metadata: %w", err)
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return nil, fmt.Errorf("inspect document metadata: %w", err)
+			}
+			text := string(content)
+			nodes = append(nodes, Node{Name: entry.Name(), Path: path, Type: "document", Title: frontmatterValue(text, frontmatterNamePattern), Description: frontmatterValue(text, frontmatterDescriptionPattern), PageType: pageTypeFromContent(text), Owner: ownerFromContent(text, r.defaultOwner), ModifiedBy: modifiedByFromContent(text), AITouched: aiTouchedFromContent(text), UpdatedAt: updatedAtFromContent(text, info.ModTime())})
 		}
 	}
 	sort.Slice(nodes, func(i, j int) bool {
@@ -360,7 +443,7 @@ func (r *repository) get(path string) (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("read document: %w", err)
 	}
-	return Document{ID: documentIDFromContent(string(content)), Path: path, Content: string(content), PageType: pageTypeFromContent(string(content)), UpdatedAt: info.ModTime()}, nil
+	return Document{ID: documentIDFromContent(string(content)), Path: path, Content: string(content), PageType: pageTypeFromContent(string(content)), Owner: ownerFromContent(string(content), r.defaultOwner), ModifiedBy: modifiedByFromContent(string(content)), AITouched: aiTouchedFromContent(string(content)), UpdatedAt: updatedAtFromContent(string(content), info.ModTime())}, nil
 }
 
 // create adds one document or directory without overwriting existing data.
@@ -390,7 +473,7 @@ func (r *repository) create(input CreateInput) error {
 	if err != nil {
 		return err
 	}
-	input.Content = ensureDocumentProperties(input.Path, input.Content, input.PageType, documentID)
+	input.Content = ensureDocumentMetadata(input.Path, input.Content, input.PageType, input.Owner, input.ModifiedBy, false, documentID, time.Now().UTC())
 	if err := os.WriteFile(target, []byte(input.Content), 0o644); err != nil {
 		return fmt.Errorf("create document: %w", err)
 	}
@@ -398,7 +481,7 @@ func (r *repository) create(input CreateInput) error {
 }
 
 // write replaces the contents of an existing Markdown document.
-func (r *repository) write(path, content string) error {
+func (r *repository) write(path, content string, actor ProfileType) error {
 	if err := validatePath(path, true); err != nil {
 		return err
 	}
@@ -420,21 +503,35 @@ func (r *repository) write(path, content string) error {
 			return err
 		}
 	}
-	content = ensureDocumentProperties(path, content, "", documentID)
+	content = ensureDocumentMetadata(path, content, "", ownerFromContent(string(existing), r.defaultOwner), actor, aiTouchedFromContent(string(existing)), documentID, time.Now().UTC())
 	if err := os.WriteFile(r.absolute(path), []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write document: %w", err)
 	}
 	return nil
 }
 
-// ensureDocumentProperties adds the required stable ID, name, description, and page type fields.
+// ensureDocumentProperties adds all required frontmatter fields for legacy callers.
 func ensureDocumentProperties(path, content string, requestedPageType PageType, documentID string) string {
+	return ensureDocumentMetadata(path, content, requestedPageType, "Human", ProfileHuman, false, documentID, time.Now().UTC())
+}
+
+// ensureDocumentMetadata keeps all AI-relevant metadata inside the Markdown file.
+func ensureDocumentMetadata(path, content string, requestedPageType PageType, requestedOwner string, actor ProfileType, forceAITouched bool, documentID string, updatedAt time.Time) string {
 	name := strings.TrimSuffix(filepath.Base(path), ".md")
 	pageType := requestedPageType
 	if pageType == "" {
-		pageType = PageTypeGeneral
+		pageType = pageTypeFromContent(content)
 	}
-	header := "---\nid: " + strconv.Quote(documentID) + "\nname: " + strconv.Quote(name) + "\ndescription: \"\"\npage_type: " + strconv.Quote(string(pageType)) + "\n---\n\n"
+	owner := requestedOwner
+	if owner == "" {
+		owner = "Human"
+	}
+	if actor != ProfileAI {
+		actor = ProfileHuman
+	}
+	aiTouched := forceAITouched || aiTouchedFromContent(content) || actor == ProfileAI
+	updated := updatedAt.UTC().Format(time.RFC3339)
+	header := "---\nid: " + strconv.Quote(documentID) + "\nname: " + strconv.Quote(name) + "\ndescription: \"\"\npage_type: " + strconv.Quote(string(pageType)) + "\nowner: " + strconv.Quote(owner) + "\nlast_modified_by: " + strconv.Quote(string(actor)) + "\nai_touched: " + strconv.FormatBool(aiTouched) + "\nupdated_at: " + strconv.Quote(updated) + "\n---\n\n"
 	if !strings.HasPrefix(content, "---\n") {
 		return header + content
 	}
@@ -449,8 +546,28 @@ func ensureDocumentProperties(path, content string, requestedPageType PageType, 
 		content = content[:4] + frontmatter + content[closing:]
 		closing = 4 + len(frontmatter)
 	}
-	if requestedPageType != "" && frontmatterPageTypePropertyPattern.MatchString(frontmatter) {
-		frontmatter = frontmatterPageTypePropertyPattern.ReplaceAllString(frontmatter, "page_type: "+strconv.Quote(string(requestedPageType)))
+	if frontmatterPageTypePropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterPageTypePropertyPattern.ReplaceAllString(frontmatter, "page_type: "+strconv.Quote(string(pageType)))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterOwnerPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterOwnerPropertyPattern.ReplaceAllString(frontmatter, "owner: "+strconv.Quote(owner))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterModifiedByPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterModifiedByPropertyPattern.ReplaceAllString(frontmatter, "last_modified_by: "+strconv.Quote(string(actor)))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterAITouchedPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterAITouchedPropertyPattern.ReplaceAllString(frontmatter, "ai_touched: "+strconv.FormatBool(aiTouched))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterUpdatedAtPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterUpdatedAtPropertyPattern.ReplaceAllString(frontmatter, "updated_at: "+strconv.Quote(updated))
 		content = content[:4] + frontmatter + content[closing:]
 		closing = 4 + len(frontmatter)
 	}
@@ -466,6 +583,18 @@ func ensureDocumentProperties(path, content string, requestedPageType PageType, 
 	}
 	if !frontmatterPageTypePropertyPattern.MatchString(frontmatter) {
 		missing += "page_type: " + strconv.Quote(string(pageType)) + "\n"
+	}
+	if !frontmatterOwnerPropertyPattern.MatchString(frontmatter) {
+		missing += "owner: " + strconv.Quote(owner) + "\n"
+	}
+	if !frontmatterModifiedByPropertyPattern.MatchString(frontmatter) {
+		missing += "last_modified_by: " + strconv.Quote(string(actor)) + "\n"
+	}
+	if !frontmatterAITouchedPropertyPattern.MatchString(frontmatter) {
+		missing += "ai_touched: " + strconv.FormatBool(aiTouched) + "\n"
+	}
+	if !frontmatterUpdatedAtPropertyPattern.MatchString(frontmatter) {
+		missing += "updated_at: " + strconv.Quote(updated) + "\n"
 	}
 	if missing == "" {
 		return content

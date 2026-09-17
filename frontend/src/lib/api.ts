@@ -3,12 +3,22 @@ export type Node = {
   path: string;
   type: "directory" | "document";
   children?: Node[];
+  title?: string;
+  description?: string;
+  pageType?: PageType;
+  owner?: string;
+  lastModifiedBy?: ProfileType;
+  aiTouched?: boolean;
+  updatedAt?: string;
 };
 
 export type PageType = string;
+export type ProfileType = "human" | "ai";
 export type PageTypeDefinition = { id: PageType; label: string; description: string; color: string; builtIn: boolean };
-export type ApplicationSettings = { pageTypes: PageTypeDefinition[] };
-export type Document = { id: string; path: string; content: string; pageType: PageType; updatedAt: string };
+export type ProfileSettings = { type: ProfileType; firstName: string; lastName: string };
+export type Permissions = { view: boolean; create: boolean; edit: boolean; delete: boolean };
+export type ApplicationSettings = { pageTypes: PageTypeDefinition[]; profile: ProfileSettings; aiPermissions: Permissions };
+export type Document = { id: string; path: string; content: string; pageType: PageType; owner: string; lastModifiedBy: ProfileType; aiTouched: boolean; updatedAt: string };
 export type StorageSettings = { path: string; vaultPath: string; configured: boolean };
 export type DirectoryListing = { path: string; parent?: string; directories: Array<{ name: string; path: string }> };
 export type GraphNode = { id: string; documentId?: string; name: string; type: Node["type"]; pageType?: PageType };
@@ -48,7 +58,7 @@ export const api = {
   },
   storage: () => request<StorageSettings>("/api/settings/storage"),
   applicationSettings: () => request<ApplicationSettings>("/api/settings/application"),
-  configureApplication: (settings: ApplicationSettings) => request<ApplicationSettings>("/api/settings/application", { method: "PUT", ...json(settings) }),
+  configureApplication: (profile: ProfileSettings, aiPermissions: Permissions) => request<ApplicationSettings>("/api/settings/application", { method: "PUT", ...json({ profile, aiPermissions }) }),
   configureStorage: (path: string) => request<StorageSettings>("/api/settings/storage", { method: "PUT", ...json({ path }) }),
   directories: (path?: string) => request<DirectoryListing>(`/api/settings/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
 };

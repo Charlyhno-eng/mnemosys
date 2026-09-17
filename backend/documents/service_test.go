@@ -72,6 +72,37 @@ func TestDocumentsReceiveDefaultProperties(t *testing.T) {
 	}
 }
 
+func TestExistingDocumentsReceiveSearchableMetadataAtStartup(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "legacy.md")
+	modified := time.Date(2024, time.March, 4, 12, 30, 0, 0, time.UTC)
+	content := "---\nid: \"11111111-1111-4111-8111-111111111111\"\nname: \"Legacy guide\"\ndescription: \"Migration handbook\"\npage_type: \"business\"\n---\n\n# Legacy"
+	if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("legacy.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Owner != "Human" || !document.UpdatedAt.Equal(modified) || !strings.Contains(document.Content, `updated_at: "2024-03-04T12:30:00Z"`) {
+		t.Fatalf("migrated document = %#v", document)
+	}
+	tree, err := service.Tree()
+	if err != nil || len(tree) != 1 {
+		t.Fatalf("tree = %#v, %v", tree, err)
+	}
+	if tree[0].Title != "Legacy guide" || tree[0].Description != "Migration handbook" || tree[0].PageType != "business" || tree[0].Owner != "Human" || !tree[0].UpdatedAt.Equal(modified) {
+		t.Fatalf("search metadata = %#v", tree[0])
+	}
+}
+
 func TestDocumentIDIsImmutableAcrossWritesAndMoves(t *testing.T) {
 	service, _ := newTestService(t)
 	if err := service.Create(CreateInput{Path: "before.md", Type: "document", Content: "# Before"}); err != nil {
@@ -146,6 +177,10 @@ func TestExistingDocumentsReceiveUniqueStableIDs(t *testing.T) {
 
 func TestDocumentPageTypeAndUpdatedAt(t *testing.T) {
 	service, root := newTestService(t)
+	all := Permissions{View: true, Create: true, Edit: true, Delete: true}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI, FirstName: "Ada", LastName: "Agent"}, AIPermissions: all}); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.Create(CreateInput{Path: "system.md", Type: "document", PageType: "technical", Content: "# System"}); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +188,7 @@ func TestDocumentPageTypeAndUpdatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.PageType != "technical" || !strings.Contains(document.Content, `page_type: "technical"`) {
+	if document.PageType != "technical" || document.Owner != "Ada Agent" || !document.AITouched || document.ModifiedBy != ProfileAI || !strings.Contains(document.Content, `page_type: "technical"`) || !strings.Contains(document.Content, `owner: "Ada Agent"`) || !strings.Contains(document.Content, `ai_touched: true`) || !strings.Contains(document.Content, `updated_at: "`) {
 		t.Fatalf("document = %#v", document)
 	}
 	if document.UpdatedAt.IsZero() {
@@ -188,6 +223,26 @@ func TestRejectsInvalidPageType(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "bad.md")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("invalid document was created: %v", statErr)
+	}
+}
+
+func TestUpdateRefreshesFrontmatterTimestamp(t *testing.T) {
+	service, _ := newTestService(t)
+	content := "---\nupdated_at: \"2020-01-01T00:00:00Z\"\n---\n\nOld"
+	if err := service.Create(CreateInput{Path: "dated.md", Type: "document", Content: content}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("dated.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := document.Content + "\nChanged"
+	if err := service.Update(UpdateInput{Path: "dated.md", Content: &updated}); err != nil {
+		t.Fatal(err)
+	}
+	document, err = service.Get("dated.md")
+	if err != nil || !document.UpdatedAt.After(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) || strings.Contains(document.Content, `updated_at: "2020-01-01T00:00:00Z"`) {
+		t.Fatalf("updated timestamp document = %#v, %v", document, err)
 	}
 }
 
@@ -427,42 +482,83 @@ func TestConfigurableStoragePersistsAndReloads(t *testing.T) {
 	}
 }
 
-func TestApplicationSettingsPersistAndAllowCustomPageType(t *testing.T) {
+func TestApplicationProfilePermissionsPersistAndControlOperations(t *testing.T) {
 	base := t.TempDir()
 	configPath := filepath.Join(base, "config.toml")
 	service, err := NewConfigurableService(filepath.Join(base, "documents"), configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	types := append(defaultPageTypes(), PageTypeDefinition{ID: "ops-runbook", Label: "Runbook", Description: "Operations", Color: "#123abc"})
-	settings, err := service.ConfigureApplication(ApplicationSettingsInput{PageTypes: types})
+	permissions := Permissions{View: true, Create: true, Edit: true}
+	settings, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI, FirstName: "Ada", LastName: "Agent"}, AIPermissions: permissions})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsPageType(settings.PageTypes, "ops-runbook") {
+	if settings.Profile.Type != ProfileAI || settings.Profile.FirstName != "Ada" || settings.AIPermissions != permissions || len(settings.PageTypes) != 4 {
 		t.Fatalf("settings = %#v", settings)
 	}
-	if err := service.Create(CreateInput{Path: "ops.md", Type: "document", PageType: "ops-runbook"}); err != nil {
-		t.Fatalf("create custom page type: %v", err)
+	if err := service.Create(CreateInput{Path: "ops.md", Type: "document"}); err != nil {
+		t.Fatalf("create AI-owned page: %v", err)
 	}
 	document, err := service.Get("ops.md")
-	if err != nil || document.PageType != "ops-runbook" {
-		t.Fatalf("custom page type document = %#v, %v", document, err)
+	if err != nil || document.Owner != "Ada Agent" || !document.AITouched {
+		t.Fatalf("AI-owned document = %#v, %v", document, err)
+	}
+	if err := service.Delete("ops.md"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("delete error = %v, want forbidden", err)
+	}
+	changed := permissions
+	changed.Delete = true
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: settings.Profile, AIPermissions: changed}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("AI changed permissions: %v", err)
+	}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileHuman}, AIPermissions: permissions}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("AI promoted itself to human: %v", err)
 	}
 	reloaded, err := NewConfigurableService(filepath.Join(base, "other-documents"), configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := reloaded.ApplicationSettings(); !containsPageType(got.PageTypes, "ops-runbook") {
+	if got := reloaded.ApplicationSettings(); got.Profile.Type != ProfileAI || got.Profile.FirstName != "Ada" || got.AIPermissions != permissions {
 		t.Fatalf("reloaded settings = %#v", got)
 	}
 }
 
-func TestApplicationSettingsRejectInvalidCustomType(t *testing.T) {
+func TestApplicationSettingsRequireAProfile(t *testing.T) {
 	service, _ := newTestService(t)
-	types := append(defaultPageTypes(), PageTypeDefinition{ID: "../bad", Label: "Bad", Color: "#123456"})
-	if _, err := service.ConfigureApplication(ApplicationSettingsInput{PageTypes: types}); !errors.Is(err, ErrInvalidSettings) {
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{}); !errors.Is(err, ErrInvalidSettings) {
 		t.Fatalf("error = %v, want invalid settings", err)
+	}
+}
+
+func TestAIMarksEditedHumanPages(t *testing.T) {
+	service, _ := newTestService(t)
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileHuman, FirstName: "Grace", LastName: "Hopper"}, AIPermissions: defaultAIPermissions()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "human.md", Type: "document", Content: "Human content"}); err != nil {
+		t.Fatal(err)
+	}
+	permissions := Permissions{View: true, Edit: true}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI, FirstName: "Doc", LastName: "Agent"}, AIPermissions: permissions}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "blocked.md", Type: "document"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("AI create error = %v, want forbidden", err)
+	}
+	if _, err := service.Get("human.md"); err != nil {
+		t.Fatalf("AI view: %v", err)
+	}
+	content := "Updated by AI"
+	if err := service.Update(UpdateInput{Path: "human.md", Content: &content}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("human.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Owner != "Grace Hopper" || document.ModifiedBy != ProfileAI || !document.AITouched || !strings.Contains(document.Content, `last_modified_by: "ai"`) || !strings.Contains(document.Content, "ai_touched: true") {
+		t.Fatalf("AI-modified document = %#v", document)
 	}
 }
 

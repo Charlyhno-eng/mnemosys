@@ -9,14 +9,16 @@ Mnemosys is an enterprise memory and knowledge platform. It centralizes an organ
 - A filesystem-backed Markdown vault with a configurable storage location and no database.
 - A nested page and folder tree with create, read, edit, rename, move, drag-and-drop, and recursive delete operations.
 - A Markdown editor with preview mode, autosave, undo/redo history, formatting tools, image upload, and drag-and-drop media insertion.
-- YAML-style frontmatter containing a stable immutable UUID, name, description, and page type for every page. Existing pages receive an ID automatically, and duplicate IDs are repaired at startup.
+- YAML-style frontmatter containing a stable immutable UUID, name, description, page type, owner name, last-modifying profile, persistent AI-touch marker, and last-modified timestamp for every page. Missing metadata and duplicate IDs are repaired at startup.
 - Four built-in page types: General, Business documentation, Technical documentation, and Incident documentation.
-- Custom page types and graph colors managed from application settings and persisted in `config/config.toml`.
+- Four code-owned page types and graph colors defined in `backend/documents/page_types.go` and exposed read-only to the frontend.
+- One active Human or AI profile, including first and last name, persisted in `config/config.toml`; Human is the default.
+- Backend-enforced AI permissions for view, create, edit, and delete. AI defaults to view-only, and only a Human profile can change these rights.
 - A knowledge graph showing folder hierarchy and explicit Obsidian-style `[[wiki links]]`, with search, filters, zoom, layout controls, and page-type colors.
 - Stable links using `[[id:<uuid>]]` or `[[<uuid>]]`, so references survive page renames and moves.
 - Backlinks and navigation through wiki links.
-- A dashboard with space browsing and title/path filtering.
-- A right-side, scrollable settings drawer for page types and vault location.
+- A dashboard and page tree with filtering across paths and page metadata.
+- A right-side, scrollable settings drawer for the active profile, identity, AI permissions, and vault location.
 - An English-only interface.
 - A REST API for pages, folders, graph data, application settings, storage browsing, and media.
 - Backend protections for path traversal, symbolic links, invalid page types, malformed JSON, unsupported images, upload size limits, and concurrent mutations.
@@ -33,7 +35,7 @@ Mnemosys is an enterprise memory and knowledge platform. It centralizes an organ
 
 ## Data layout
 
-The location selected by the user is stored in `config/config.toml`. Mnemosys creates a `Mnemosys-Vault` directory within that location and stores the Markdown tree and its media there. Application settings such as page types are also stored in `config/config.toml`. Page metadata is stored directly in each Markdown file's frontmatter.
+The location selected by the user, active profile, identity, and AI permissions are stored in `config/config.toml`. Mnemosys creates a `Mnemosys-Vault` directory within that location and stores the Markdown tree and its media there. Page types are defined in `backend/documents/page_types.go`. Page metadata is stored directly in each Markdown file's frontmatter.
 
 ## Quality and security
 
@@ -67,6 +69,7 @@ mnemosys/
 │       ├── handler.go              # REST routes and HTTP validation
 │       ├── handler_test.go         # HTTP integration tests
 │       ├── model.go                # API and domain models
+│       ├── page_types.go           # Code-owned page type catalogue
 │       ├── repository.go           # Filesystem, frontmatter, graph, and assets
 │       ├── service.go              # Synchronized application operations
 │       └── service_test.go         # Domain, filesystem, and concurrency tests

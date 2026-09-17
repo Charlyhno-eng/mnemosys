@@ -184,6 +184,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, ErrForbidden):
+		status = http.StatusForbidden
 	case errors.Is(err, ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, ErrAlreadyExists):

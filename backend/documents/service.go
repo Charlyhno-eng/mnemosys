@@ -14,12 +14,13 @@ import (
 // Service serializes filesystem changes so requests made through this process
 // cannot observe half-completed operations.
 type Service struct {
-	repository  *repository
-	mu          sync.RWMutex
-	configPath  string
-	storagePath string
-	configured  bool
-	pageTypes   []PageTypeDefinition
+	repository    *repository
+	mu            sync.RWMutex
+	configPath    string
+	storagePath   string
+	configured    bool
+	profile       ProfileSettings
+	aiPermissions Permissions
 }
 
 // VaultDirectoryName is the application-owned directory created inside a selected location.
@@ -27,7 +28,7 @@ const VaultDirectoryName = "Mnemosys-Vault"
 
 // NewService creates a service with an already confirmed document directory.
 func NewService(root string) (*Service, error) {
-	return newService(root, root, "", true, defaultPageTypes())
+	return newService(root, root, "", true, defaultProfile(), defaultAIPermissions())
 }
 
 // NewConfigurableService creates a service backed by a persisted storage selection.
@@ -36,14 +37,16 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 	root := defaultRoot
 	storagePath := defaultRoot
 	configured := false
-	pageTypes := defaultPageTypes()
+	profile := defaultProfile()
+	aiPermissions := defaultAIPermissions()
 	data, err := os.ReadFile(configPath)
 	if err == nil {
 		config, err := parseApplicationConfig(data)
 		if err != nil {
 			return nil, fmt.Errorf("decode application config: %w", err)
 		}
-		pageTypes = config.PageTypes
+		profile = config.Profile
+		aiPermissions = config.AIPermissions
 		if config.StoragePath != "" {
 			storagePath, root, err = prepareVaultRoot(config.StoragePath)
 			if err != nil {
@@ -54,26 +57,42 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("read application config: %w", err)
 	}
-	return newService(root, storagePath, configPath, configured, pageTypes)
+	return newService(root, storagePath, configPath, configured, profile, aiPermissions)
 }
 
 // newService validates the root and constructs the shared service state.
-func newService(root, storagePath, configPath string, configured bool, pageTypes []PageTypeDefinition) (*Service, error) {
+func newService(root, storagePath, configPath string, configured bool, profile ProfileSettings, aiPermissions Permissions) (*Service, error) {
 	root, err := prepareStorageRoot(root)
 	if err != nil {
 		return nil, err
 	}
-	repository, err := newRepository(root)
+	repository, err := newRepository(root, profileName(profile))
 	if err != nil {
 		return nil, err
 	}
-	return &Service{repository: repository, configPath: configPath, storagePath: storagePath, configured: configured, pageTypes: clonePageTypes(pageTypes)}, nil
+	return &Service{repository: repository, configPath: configPath, storagePath: storagePath, configured: configured, profile: profile, aiPermissions: aiPermissions}, nil
 }
+
+func profileName(profile ProfileSettings) string {
+	name := strings.TrimSpace(profile.FirstName + " " + profile.LastName)
+	if name != "" {
+		return name
+	}
+	if profile.Type == ProfileAI {
+		return "AI"
+	}
+	return "Human"
+}
+
+func (s *Service) allowed(permission bool) bool { return s.profile.Type == ProfileHuman || permission }
 
 // Tree returns the complete visible directory and Markdown document hierarchy.
 func (s *Service) Tree() ([]Node, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if !s.allowed(s.aiPermissions.View) {
+		return nil, ErrForbidden
+	}
 	return s.repository.tree()
 }
 
@@ -81,6 +100,9 @@ func (s *Service) Tree() ([]Node, error) {
 func (s *Service) Graph() (Graph, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if !s.allowed(s.aiPermissions.View) {
+		return Graph{}, ErrForbidden
+	}
 	return s.repository.graph()
 }
 
@@ -88,6 +110,9 @@ func (s *Service) Graph() (Graph, error) {
 func (s *Service) Get(path string) (Document, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if !s.allowed(s.aiPermissions.View) {
+		return Document{}, ErrForbidden
+	}
 	return s.repository.get(path)
 }
 
@@ -95,13 +120,18 @@ func (s *Service) Get(path string) (Document, error) {
 func (s *Service) Create(input CreateInput) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.allowed(s.aiPermissions.Create) {
+		return ErrForbidden
+	}
 	if input.Type == "document" {
 		if input.PageType == "" {
 			input.PageType = PageTypeGeneral
 		}
-		if !containsPageType(s.pageTypes, input.PageType) {
+		if !containsPageType(input.PageType) {
 			return ErrInvalidPageType
 		}
+		input.Owner = profileName(s.profile)
+		input.ModifiedBy = s.profile.Type
 	}
 	return s.repository.create(input)
 }
@@ -113,6 +143,9 @@ func (s *Service) Update(input UpdateInput) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.allowed(s.aiPermissions.Edit) {
+		return ErrForbidden
+	}
 	if input.NewPath != nil {
 		if err := s.repository.move(input.Path, *input.NewPath); err != nil {
 			return err
@@ -120,7 +153,14 @@ func (s *Service) Update(input UpdateInput) error {
 		input.Path = *input.NewPath
 	}
 	if input.Content != nil {
-		return s.repository.write(input.Path, *input.Content)
+		return s.repository.write(input.Path, *input.Content, s.profile.Type)
+	}
+	if input.NewPath != nil && strings.HasSuffix(input.Path, ".md") {
+		document, err := s.repository.get(input.Path)
+		if err != nil {
+			return err
+		}
+		return s.repository.write(input.Path, document.Content, s.profile.Type)
 	}
 	return nil
 }
@@ -129,6 +169,9 @@ func (s *Service) Update(input UpdateInput) error {
 func (s *Service) Delete(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.allowed(s.aiPermissions.Delete) {
+		return ErrForbidden
+	}
 	return s.repository.remove(path)
 }
 
@@ -136,6 +179,9 @@ func (s *Service) Delete(path string) error {
 func (s *Service) StoreAsset(data []byte) (Asset, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.allowed(s.aiPermissions.Edit) {
+		return Asset{}, ErrForbidden
+	}
 	return s.repository.storeAsset(data)
 }
 
@@ -143,6 +189,9 @@ func (s *Service) StoreAsset(data []byte) (Asset, error) {
 func (s *Service) Asset(name string) (Asset, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if !s.allowed(s.aiPermissions.View) {
+		return Asset{}, ErrForbidden
+	}
 	return s.repository.asset(name)
 }
 
@@ -156,36 +205,45 @@ func (s *Service) Storage() StorageSettings {
 func (s *Service) ApplicationSettings() ApplicationSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return ApplicationSettings{PageTypes: clonePageTypes(s.pageTypes)}
+	return ApplicationSettings{PageTypes: defaultPageTypes(), Profile: s.profile, AIPermissions: s.aiPermissions}
 }
 
 func (s *Service) ConfigureApplication(input ApplicationSettingsInput) (ApplicationSettings, error) {
-	pageTypes, err := validatePageTypes(input.PageTypes)
+	profile, err := validateProfile(input.Profile)
 	if err != nil {
 		return ApplicationSettings{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.profile.Type == ProfileAI {
+		if input.AIPermissions != s.aiPermissions || profile.Type != ProfileAI {
+			return ApplicationSettings{}, ErrForbidden
+		}
+	}
 	if s.configPath != "" {
 		storagePath := ""
 		if s.configured {
 			storagePath = s.storagePath
 		}
-		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, PageTypes: pageTypes}); err != nil {
+		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, Profile: profile, AIPermissions: input.AIPermissions}); err != nil {
 			return ApplicationSettings{}, err
 		}
 	}
-	s.pageTypes = clonePageTypes(pageTypes)
-	return ApplicationSettings{PageTypes: clonePageTypes(s.pageTypes)}, nil
+	s.profile = profile
+	s.aiPermissions = input.AIPermissions
+	return ApplicationSettings{PageTypes: defaultPageTypes(), Profile: s.profile, AIPermissions: s.aiPermissions}, nil
 }
 
 // ConfigureStorage validates, persists, and activates a new document directory.
 func (s *Service) ConfigureStorage(path string) (StorageSettings, error) {
+	s.mu.RLock()
+	owner := profileName(s.profile)
+	s.mu.RUnlock()
 	storagePath, root, err := prepareVaultRoot(strings.TrimSpace(path))
 	if err != nil {
 		return StorageSettings{}, err
 	}
-	repository, err := newRepository(root)
+	repository, err := newRepository(root, owner)
 	if err != nil {
 		return StorageSettings{}, err
 	}
@@ -194,7 +252,7 @@ func (s *Service) ConfigureStorage(path string) (StorageSettings, error) {
 	defer s.mu.Unlock()
 	settings := StorageSettings{Path: storagePath, VaultPath: root, Configured: true}
 	if s.configPath != "" {
-		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, PageTypes: s.pageTypes}); err != nil {
+		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, Profile: s.profile, AIPermissions: s.aiPermissions}); err != nil {
 			return StorageSettings{}, err
 		}
 	}

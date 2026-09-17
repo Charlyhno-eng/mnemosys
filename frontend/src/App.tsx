@@ -6,7 +6,7 @@ import { Icons } from "./components/Icons";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownPreview } from "./components/MarkdownPreview";
-import { api, type ApplicationSettings, type DirectoryListing, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type StorageSettings } from "./lib/api";
+import { api, type ApplicationSettings, type DirectoryListing, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type Permissions, type ProfileSettings, type StorageSettings } from "./lib/api";
 
 type Modal =
   | { kind: "create"; type: Node["type"]; parent: string }
@@ -52,7 +52,7 @@ function resolveWikiNode(nodes: Node[], rawTarget: string): Node | null {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function documentProperty(content: string, key: "name" | "description" | "page_type", fallback = "") {
+function documentProperty(content: string, key: "name" | "description" | "page_type" | "owner", fallback = "") {
   if (!content.startsWith("---\n")) return fallback;
   const closing = content.indexOf("\n---", 4);
   if (closing < 0) return fallback;
@@ -75,7 +75,10 @@ function filterTree(nodes: Node[], query: string): Node[] {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return nodes;
   return nodes.flatMap((node) => {
-    if (node.type === "document") return node.name.toLocaleLowerCase().includes(normalized) ? [node] : [];
+    if (node.type === "document") {
+      const metadata = [node.name, node.path, node.title, node.description, node.pageType, node.owner, node.lastModifiedBy, node.updatedAt].filter(Boolean).join(" ").toLocaleLowerCase();
+      return metadata.includes(normalized) ? [node] : [];
+    }
     const children = filterTree(node.children ?? [], query);
     return node.name.toLocaleLowerCase().includes(normalized) || children.length ? [{ ...node, children }] : [];
   });
@@ -107,9 +110,9 @@ export function App() {
   const [uploading, setUploading] = useState(false);
   const [imageDrag, setImageDrag] = useState(false);
   const [storage, setStorage] = useState<StorageSettings | null>(null);
-  const [applicationSettings, setApplicationSettings] = useState<ApplicationSettings>({ pageTypes: fallbackPageTypes });
-  const [draftPageTypes, setDraftPageTypes] = useState<PageTypeDefinition[]>(fallbackPageTypes);
-  const [newPageTypeName, setNewPageTypeName] = useState("");
+  const [applicationSettings, setApplicationSettings] = useState<ApplicationSettings>({ pageTypes: fallbackPageTypes, profile: { type: "human", firstName: "", lastName: "" }, aiPermissions: { view: true, create: false, edit: false, delete: false } });
+  const [draftProfile, setDraftProfile] = useState<ProfileSettings>({ type: "human", firstName: "", lastName: "" });
+  const [draftPermissions, setDraftPermissions] = useState<Permissions>({ view: true, create: false, edit: false, delete: false });
   const [storageOpen, setStorageOpen] = useState(false);
   const [storagePath, setStoragePath] = useState("");
   const [storageBusy, setStorageBusy] = useState(false);
@@ -133,10 +136,11 @@ export function App() {
   const homeDocuments = useMemo(() => documents(spaceNode?.type === "directory" ? [spaceNode] : tree), [spaceNode, tree]);
   const homeResults = useMemo(() => {
     const normalized = homeQuery.trim().toLocaleLowerCase();
-    return normalized ? homeDocuments.filter((node) => node.path.toLocaleLowerCase().includes(normalized)) : [];
+    return normalized ? homeDocuments.filter((node) => [node.name, node.path, node.title, node.description, node.pageType, node.owner, node.lastModifiedBy, node.updatedAt].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized)) : [];
   }, [homeDocuments, homeQuery]);
   const dirty = loadedPath === selectedPath && content !== savedContent;
-  const properties = useMemo(() => ({ name: documentProperty(content, "name", selectedPath ? baseName(selectedPath).replace(/\.md$/, "") : ""), description: documentProperty(content, "description"), pageType: documentProperty(content, "page_type", "general") as PageType }), [content, selectedPath]);
+  const properties = useMemo(() => ({ name: documentProperty(content, "name", selectedPath ? baseName(selectedPath).replace(/\.md$/, "") : ""), description: documentProperty(content, "description"), pageType: documentProperty(content, "page_type", "general") as PageType, owner: documentProperty(content, "owner", "Human") }), [content, selectedPath]);
+  const activePermissions = applicationSettings.profile.type === "human" ? { view: true, create: true, edit: true, delete: true } : applicationSettings.aiPermissions;
   const backlinks = useMemo(() => selectedPath ? graph.edges.filter((edge) => edge.type === "link" && edge.target === selectedPath).map((edge) => allEntries.find((node) => node.path === edge.source)).filter((node): node is Node => Boolean(node)) : [], [allEntries, graph.edges, selectedPath]);
 
   const flash = useCallback((message: string, tone: Notice["tone"] = "success") => setNotice({ message, tone }), []);
@@ -152,7 +156,8 @@ export function App() {
       setStorage(storageSettings);
       setStoragePath(storageSettings.path);
       setApplicationSettings(appSettings);
-      setDraftPageTypes(appSettings.pageTypes);
+      setDraftProfile(appSettings.profile);
+      setDraftPermissions(appSettings.aiPermissions);
       document.documentElement.lang = "en";
     }).catch((error) => flash(error instanceof Error ? error.message : "Settings are unavailable.", "error"));
   }, [flash]);
@@ -188,14 +193,14 @@ export function App() {
       setSavedContent(value);
       void api.get(path).then((document) => { setUpdatedAt(document.updatedAt); setDocumentID(document.id); }).catch(() => undefined);
       setSaveStatus("saved");
-      void api.graph().then(setGraph).catch(() => undefined);
+      void refreshTree().catch(() => undefined);
       return true;
     } catch (error) {
       setSaveStatus("error");
       flash(error instanceof Error ? error.message : tx("Unable to save.", "Impossible d’enregistrer."), "error");
       return false;
     }
-  }, [content, flash, loadedPath, selectedPath, tx]);
+  }, [content, flash, loadedPath, refreshTree, selectedPath, tx]);
 
   useEffect(() => {
     if (!dirty || !selectedPath) return;
@@ -209,7 +214,7 @@ export function App() {
       if (editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redo() : undo(); return; }
       if (editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); redo(); return; }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); }
-      if (!modal && !storageOpen && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") { event.preventDefault(); openCreate("document"); }
+      if (activePermissions.create && !modal && !storageOpen && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") { event.preventDefault(); openCreate("document"); }
       if (storageOpen && event.key === "Escape" && !storageBusy) setStorageOpen(false);
     };
     window.addEventListener("keydown", shortcut);
@@ -453,7 +458,7 @@ export function App() {
       if (dirty && selectedPath && !(await save(selectedPath, content))) return;
       const [storageSettings, appSettings] = await Promise.all([
         storage?.path === storagePath.trim() ? Promise.resolve(storage) : api.configureStorage(storagePath.trim()),
-        api.configureApplication({ pageTypes: draftPageTypes }),
+        api.configureApplication(draftProfile, draftPermissions),
       ]);
       setStorage(storageSettings);
       setStoragePath(storageSettings.path);
@@ -477,22 +482,10 @@ export function App() {
   }
 
   function openStoragePicker() {
-    setDraftPageTypes(applicationSettings.pageTypes.map((type) => ({ ...type })));
-    setNewPageTypeName("");
+    setDraftProfile({ ...applicationSettings.profile });
+    setDraftPermissions({ ...applicationSettings.aiPermissions });
     setStorageOpen(true);
     void browseStorage(storage?.configured ? storage.path : undefined);
-  }
-
-  function addPageType() {
-    const label = newPageTypeName.trim();
-    if (!label) return;
-    const base = label.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 28) || "custom";
-    let id = base;
-    let suffix = 2;
-    while (draftPageTypes.some((type) => type.id === id)) id = `${base.slice(0, 28)}-${suffix++}`;
-    const colors = ["#43bfd0", "#e5a950", "#d477d9", "#8bc34a", "#ff8a65"];
-    setDraftPageTypes((types) => [...types, { id, label, description: "Custom documentation type.", color: colors[(types.length - 4) % colors.length], builtIn: false }]);
-    setNewPageTypeName("");
   }
 
   const crumbs = graphOpen ? [tx("Graph", "Graphe")] : selectedPath?.split("/") ?? (spacePath ? spacePath.split("/") : []);
@@ -502,15 +495,15 @@ export function App() {
     <aside className="sidebar">
       <button className="brand" onClick={() => setSearchParams({})}><span className="brand-mark"><img src="/mnemosys-logo.png?v=2" alt="" /></span><span><strong>Mnemosys</strong><span>{tx("Team memory", "Mémoire d’équipe")}</span></span></button>
       <div className="quick-actions">
-        <button className="button primary grow" onClick={() => openCreate("document")}><Icons.plus />{tx("New page", "Nouvelle page")}</button>
-        <button className="icon-button framed" onClick={() => openCreate("directory")} title={tx("New folder", "Nouveau dossier")} aria-label={tx("New folder", "Nouveau dossier")}><Icons.folder /></button>
+        <button className="button primary grow" onClick={() => openCreate("document")} disabled={!activePermissions.create}><Icons.plus />{tx("New page", "Nouvelle page")}</button>
+        <button className="icon-button framed" onClick={() => openCreate("directory")} disabled={!activePermissions.create} title={tx("New folder", "Nouveau dossier")} aria-label={tx("New folder", "Nouveau dossier")}><Icons.folder /></button>
       </div>
       <div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Filter pages…", "Filtrer les pages…")} aria-label={tx("Filter pages", "Filtrer les pages")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
       <button className={`home-link ${!selectedPath && !spacePath && !graphOpen ? "active" : ""}`} onClick={() => setSearchParams({})}><Icons.book />{tx("Overview", "Vue d’ensemble")}</button>
       <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => setSearchParams({ view: "graph" })}><Icons.graph />{tx("Graph", "Graphe")}</button>
       <div className="sidebar-label"><span>{tx("SPACE", "ESPACE")}</span><span>{tree.length}</span></div>
       <nav className={rootDrop ? "root-drop" : ""} data-drop-label={tx("Move to root", "Déplacer à la racine")} aria-label={tx("Documentation tree", "Arborescence documentaire")} onDragOver={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setRootDrop(true); } }} onDragLeave={() => setRootDrop(false)} onDrop={dropAtRoot}>
-        {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={visibleTree} selectedPath={selectedPath} onSelect={(path) => void select(path)} onAction={openAction} onMove={(node, folder) => void moveNode(node, folder)} />}
+        {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={visibleTree} selectedPath={selectedPath} permissions={activePermissions} onSelect={(path) => void select(path)} onAction={openAction} onMove={(node, folder) => void moveNode(node, folder)} />}
       </nav>
     </aside>
 
@@ -526,8 +519,8 @@ export function App() {
       {graphOpen ? <KnowledgeGraph graph={graph} pageTypes={pageTypes} onOpen={openGraphNode} /> : selectedPath ? <>
         <div className="editor-toolbar">
           <div className="toolbar-left">
-            <div className="mode-switch"><button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Icons.eye />{tx("Preview", "Aperçu")}</button><button className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")}><Icons.edit />{tx("Edit", "Modifier")}</button></div>
-            <div className="link-control"><button className={`link-button ${linkPickerOpen ? "active" : ""}`} onClick={() => setLinkPickerOpen((open) => !open)}><Icons.link />{tx("Link", "Relier")}</button>{linkPickerOpen && <LinkPicker nodes={allEntries.filter((node) => node.path !== selectedPath)} onSelect={insertWikiLink} onClose={() => setLinkPickerOpen(false)} />}</div>
+            <div className="mode-switch"><button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Icons.eye />{tx("Preview", "Aperçu")}</button><button className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")} disabled={!activePermissions.edit}><Icons.edit />{tx("Edit", "Modifier")}</button></div>
+            {activePermissions.edit && <div className="link-control"><button className={`link-button ${linkPickerOpen ? "active" : ""}`} onClick={() => setLinkPickerOpen((open) => !open)}><Icons.link />{tx("Link", "Relier")}</button>{linkPickerOpen && <LinkPicker nodes={allEntries.filter((node) => node.path !== selectedPath)} onSelect={insertWikiLink} onClose={() => setLinkPickerOpen(false)} />}</div>}
             {mode === "edit" && <div className="format-tools" aria-label="Markdown formatting">
               <button onClick={undo} disabled={historyRef.current.past.length === 0} title="Undo (Ctrl+Z)">↶</button>
               <button onClick={redo} disabled={historyRef.current.future.length === 0} title="Redo (Ctrl+Shift+Z)">↷</button>
@@ -556,11 +549,11 @@ export function App() {
           <div className={`save-state ${saveStatus === "error" ? "error" : ""}`}><span className={saveStatus === "saving" ? "saving-spinner" : ""}>{saveStatus !== "saving" && <Icons.check />}</span>{uploading ? tx("Uploading image…", "Import de l’image…") : statusLabel}</div>
         </div>
         {loadedPath !== selectedPath ? <div className="document-loading"><span className="saving-spinner" />{tx("Loading document…", "Chargement du document…")}</div> : <>
-          <div className={`document-properties ${mode}`}><span>{tx("Properties", "Propriétés")}</span>{mode === "edit" ? <><label>{tx("Name", "Nom")}<input value={properties.name} onChange={(event) => setDocumentProperty("name", event.target.value)} /></label><label>Description<input value={properties.description} onChange={(event) => setDocumentProperty("description", event.target.value)} placeholder={tx("Add a description…", "Ajouter une description…")} /></label></> : <><strong>{properties.name}</strong>{properties.description && <small>{properties.description}</small>}</>}<span className="page-type-badge" style={{ color: pageTypes.find((type) => type.id === properties.pageType)?.color ?? "#62a6e8", background: `${pageTypes.find((type) => type.id === properties.pageType)?.color ?? "#62a6e8"}18` }}>{pageTypes.find((type) => type.id === properties.pageType) ? pageTypeLabel(pageTypes.find((type) => type.id === properties.pageType)!) : pageTypeLabel(pageTypes[0])}</span>{documentID && <code className="document-id" title="Stable page identifier">{documentID}</code>}{updatedAt && <time dateTime={updatedAt}>{tx("Updated", "Modifiée le")} {new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(updatedAt))}</time>}</div>
+          <div className={`document-properties ${mode}`}><span>{tx("Properties", "Propriétés")}</span>{mode === "edit" ? <><label>{tx("Name", "Nom")}<input value={properties.name} onChange={(event) => setDocumentProperty("name", event.target.value)} /></label><label>Description<input value={properties.description} onChange={(event) => setDocumentProperty("description", event.target.value)} placeholder={tx("Add a description…", "Ajouter une description…")} /></label></> : <><strong>{properties.name}</strong>{properties.description && <small>{properties.description}</small>}</>}<small>Owner: {properties.owner}</small><span className="page-type-badge" style={{ color: pageTypes.find((type) => type.id === properties.pageType)?.color ?? "#62a6e8", background: `${pageTypes.find((type) => type.id === properties.pageType)?.color ?? "#62a6e8"}18` }}>{pageTypes.find((type) => type.id === properties.pageType) ? pageTypeLabel(pageTypes.find((type) => type.id === properties.pageType)!) : pageTypeLabel(pageTypes[0])}</span>{documentID && <code className="document-id" title="Stable page identifier">{documentID}</code>}{updatedAt && <time dateTime={updatedAt}>{tx("Updated", "Modifiée le")} {new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(updatedAt))}</time>}</div>
           {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
           <div className="backlinks"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>{node.path}</small></button>)}</div>}</div>
         </>}
-      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} space={spaceNode} onQuery={setHomeQuery} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
+      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} space={spaceNode} canCreate={activePermissions.create} onQuery={setHomeQuery} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
     </section>
 
     {notice && <div className={`toast ${notice.tone}`}><span>{notice.tone === "success" ? <Icons.check /> : "!"}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Close"><Icons.x /></button></div>}
@@ -569,9 +562,15 @@ export function App() {
       <form className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void configureSettings(); }}>
         <header className="settings-drawer-header"><div><h2 id="settings-title">Settings</h2><p>Customize how Mnemosys works.</p></div><button className="icon-button" type="button" aria-label="Close settings" onClick={() => setStorageOpen(false)} disabled={storageBusy}><Icons.x /></button></header>
         <div className="settings-drawer-body">
-          <div className="settings-section-heading"><span><Icons.file /></span><div><strong>Page types</strong><small>Built-in types are protected; add your own types here.</small></div></div>
-          <div className="page-type-settings">{draftPageTypes.map((type, index) => <div key={type.id}><input type="color" value={type.color} aria-label="Type color" onChange={(event) => setDraftPageTypes((types) => types.map((entry, entryIndex) => entryIndex === index ? { ...entry, color: event.target.value } : entry))} /><span><strong>{pageTypeLabel(type)}</strong><small>{pageTypeDescription(type)}</small></span>{!type.builtIn && <button type="button" aria-label="Delete type" onClick={() => setDraftPageTypes((types) => types.filter((entry) => entry.id !== type.id))}><Icons.trash /></button>}</div>)}</div>
-          <div className="add-page-type"><input value={newPageTypeName} onChange={(event) => setNewPageTypeName(event.target.value)} placeholder="New type name" maxLength={80} /><button className="button secondary" type="button" onClick={addPageType} disabled={!newPageTypeName.trim()}><Icons.plus />Add</button></div>
+          <div className="settings-section-heading"><span><Icons.file /></span><div><strong>Active profile</strong><small>The profile automatically becomes the owner of new pages.</small></div></div>
+          <div className="profile-settings">
+            <label><input type="radio" name="profile-type" checked={draftProfile.type === "human"} disabled={applicationSettings.profile.type === "ai"} onChange={() => setDraftProfile((profile) => ({ ...profile, type: "human" }))} /><span><strong>Human</strong><small>Full access and permission administration.</small></span></label>
+            <label><input type="radio" name="profile-type" checked={draftProfile.type === "ai"} disabled={applicationSettings.profile.type === "ai"} onChange={() => setDraftProfile((profile) => ({ ...profile, type: "ai" }))} /><span><strong>AI</strong><small>Access is limited by the permissions below.</small></span></label>
+            {applicationSettings.profile.type === "ai" && <small className="settings-error">An AI profile cannot promote itself to Human.</small>}
+          </div>
+          <div className="profile-name-fields"><label className="field"><span>First name</span><input value={draftProfile.firstName} onChange={(event) => setDraftProfile((profile) => ({ ...profile, firstName: event.target.value }))} maxLength={100} /></label><label className="field"><span>Last name</span><input value={draftProfile.lastName} onChange={(event) => setDraftProfile((profile) => ({ ...profile, lastName: event.target.value }))} maxLength={100} /></label></div>
+          <div className="settings-section-heading"><span><Icons.settings /></span><div><strong>AI permissions</strong><small>Only a human profile can change these access rights.</small></div></div>
+          <div className="permission-settings">{([['view', 'View'], ['create', 'Create'], ['edit', 'Edit'], ['delete', 'Delete']] as const).map(([key, label]) => <label key={key}><input type="checkbox" checked={draftPermissions[key]} disabled={applicationSettings.profile.type !== "human"} onChange={(event) => setDraftPermissions((permissions) => ({ ...permissions, [key]: event.target.checked }))} /><span>{label}</span></label>)}</div>
           <div className="settings-section-heading"><span><Icons.folder /></span><div><strong>Document storage</strong><small>Choose the folder that will contain Mnemosys-Vault.</small></div>{storage?.configured && <b>Configured</b>}</div>
           <div className="folder-browser">
             <div className="folder-browser-current"><button type="button" onClick={() => directoryListing?.parent && void browseStorage(directoryListing.parent)} disabled={!directoryListing?.parent || directoryBusy} title="Parent folder">←</button><span><small>Selected folder</small><strong title={directoryListing?.path}>{directoryListing?.path ?? "Loading…"}</strong></span></div>
@@ -605,11 +604,12 @@ function FolderField({ folders, value, onChange }: { folders: Node[]; value: str
   return <label className="field"><span>Location</span><select value={value} onChange={(event) => onChange(event.target.value)}><option value="">Main space</option>{folders.map((folder) => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>;
 }
 
-function Dashboard({ nodes, results, query, space, onQuery, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
+function Dashboard({ nodes, results, query, space, canCreate, onQuery, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
   nodes: Node[];
   results: Node[];
   query: string;
   space: Node | null;
+  canCreate: boolean;
   onQuery: (value: string) => void;
   onOpenDocument: (path: string) => void;
   onOpenFolder: (path: string) => void;
@@ -637,7 +637,7 @@ function Dashboard({ nodes, results, query, space, onQuery, onOpenDocument, onOp
           <span className="space-card-copy"><strong>{node.name.replace(/\.md$/, "")}</strong><small>{node.type === "directory" ? `${count} document${count > 1 ? "s" : ""}` : node.path}</small></span>
           <span className="space-card-arrow">→</span>
         </button>;
-      })}</div> : <div className="dashboard-empty"><div className="welcome-icon"><Icons.book /></div><h2>{tx("This space is empty", "Cet espace est vide")}</h2><p>{tx("Create a first page or organize documentation with a folder.", "Créez une première page ou organisez la documentation avec un dossier.")}</p><div><button className="button primary" onClick={onCreateDocument}><Icons.plus />{tx("Create a page", "Créer une page")}</button><button className="button secondary" onClick={onCreateFolder}><Icons.folder />{tx("Create a folder", "Créer un dossier")}</button></div></div>}
+      })}</div> : <div className="dashboard-empty"><div className="welcome-icon"><Icons.book /></div><h2>{tx("This space is empty", "Cet espace est vide")}</h2><p>{canCreate ? tx("Create a first page or organize documentation with a folder.", "Créez une première page ou organisez la documentation avec un dossier.") : "This profile has read-only access."}</p>{canCreate && <div><button className="button primary" onClick={onCreateDocument}><Icons.plus />{tx("Create a page", "Créer une page")}</button><button className="button secondary" onClick={onCreateFolder}><Icons.folder />{tx("Create a folder", "Créer un dossier")}</button></div>}</div>}
     </>}
   </div>;
 }

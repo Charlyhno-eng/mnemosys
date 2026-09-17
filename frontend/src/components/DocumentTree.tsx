@@ -7,12 +7,13 @@ export type TreeAction = "rename" | "move" | "delete" | "new-document" | "new-di
 type Props = {
   nodes: Node[];
   selectedPath: string | null;
+  permissions: { create: boolean; edit: boolean; delete: boolean };
   onSelect: (path: string) => void;
   onAction: (node: Node, action: TreeAction) => void;
   onMove: (source: Node, targetFolder: string) => void;
 };
 
-export function DocumentTree({ nodes, selectedPath, onSelect, onAction, onMove }: Props) {
+export function DocumentTree({ nodes, selectedPath, permissions, onSelect, onAction, onMove }: Props) {
   const tx = (english: string, _french: string) => english;
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [menuPath, setMenuPath] = useState<string | null>(null);
@@ -46,28 +47,29 @@ export function DocumentTree({ nodes, selectedPath, onSelect, onAction, onMove }
       const folder = node.type === "directory";
       const expanded = folder && openFolders.has(node.path);
       return <li key={node.path} className="tree-item">
-        <div className={`tree-row ${node.path === selectedPath ? "selected" : ""} ${dropPath === node.path ? "drop-target" : ""}`}
-          style={{ paddingLeft: `${10 + depth * 15}px` }} draggable onDragStart={(event) => beginDrag(event, node)}
+        <div className={`tree-row ${node.path === selectedPath ? "selected" : ""} ${dropPath === node.path ? "drop-target" : ""} ${!folder && node.aiTouched ? "ai-touched" : ""}`}
+          style={{ paddingLeft: `${10 + depth * 15}px` }} draggable={permissions.edit} onDragStart={(event) => beginDrag(event, node)}
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenuPath(node.path); }}
-          onDragOver={folder ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropPath(node.path); } : undefined}
+          onDragOver={folder && permissions.edit ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropPath(node.path); } : undefined}
           onDragLeave={folder ? () => setDropPath(null) : undefined} onDrop={folder ? (event) => drop(event, node) : undefined}>
           <button className="tree-main" type="button" onClick={() => folder ? toggleFolder(node.path) : onSelect(node.path)} title={node.path}>
             {folder ? <Icons.chevron className={`tree-chevron ${expanded ? "expanded" : ""}`} /> : <span className="tree-spacer" />}
             {folder ? <Icons.folder className="tree-icon folder-icon" /> : <Icons.file className="tree-icon file-icon" />}
             <span className="tree-label">{folder ? node.name : node.name.replace(/\.md$/, "")}</span>
+            {!folder && node.aiTouched && <span className="ai-marker" title="Created or modified by AI">AI</span>}
           </button>
-          <button className="icon-button tree-more" type="button" onClick={() => setMenuPath(menuPath === node.path ? null : node.path)} aria-label={`${tx("Actions for", "Actions pour")} ${node.name}`} aria-expanded={menuPath === node.path}><Icons.more /></button>
+          {(permissions.edit || permissions.delete || (folder && permissions.create)) && <button className="icon-button tree-more" type="button" onClick={() => setMenuPath(menuPath === node.path ? null : node.path)} aria-label={`${tx("Actions for", "Actions pour")} ${node.name}`} aria-expanded={menuPath === node.path}><Icons.more /></button>}
           {menuPath === node.path && <>
             <button className="menu-scrim" type="button" aria-label={tx("Close menu", "Fermer le menu")} onClick={() => setMenuPath(null)} />
             <div className="context-menu">
-              {folder && <>
+              {folder && permissions.create && <>
                 <button type="button" onClick={() => { setMenuPath(null); onAction(node, "new-document"); }}><Icons.file />{tx("New document", "Nouveau document")}</button>
                 <button type="button" onClick={() => { setMenuPath(null); onAction(node, "new-directory"); }}><Icons.folder />{tx("New folder", "Nouveau dossier")}</button>
                 <span className="menu-separator" />
               </>}
-              <button type="button" onClick={() => { setMenuPath(null); onAction(node, "rename"); }}><Icons.edit />{tx("Rename", "Renommer")}</button>
-              <button type="button" onClick={() => { setMenuPath(null); onAction(node, "move"); }}><Icons.move />{tx("Move", "Déplacer")}</button>
-              <button className="destructive" type="button" onClick={() => { setMenuPath(null); onAction(node, "delete"); }}><Icons.trash />{tx("Delete", "Supprimer")}</button>
+              {permissions.edit && <button type="button" onClick={() => { setMenuPath(null); onAction(node, "rename"); }}><Icons.edit />{tx("Rename", "Renommer")}</button>}
+              {permissions.edit && <button type="button" onClick={() => { setMenuPath(null); onAction(node, "move"); }}><Icons.move />{tx("Move", "Déplacer")}</button>}
+              {permissions.delete && <button className="destructive" type="button" onClick={() => { setMenuPath(null); onAction(node, "delete"); }}><Icons.trash />{tx("Delete", "Supprimer")}</button>}
             </div>
           </>}
         </div>

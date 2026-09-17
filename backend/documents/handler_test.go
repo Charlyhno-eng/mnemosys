@@ -30,7 +30,7 @@ func TestHandlerDocumentEndpoints(t *testing.T) {
 	get := httptest.NewRequest(http.MethodGet, "/api/documents/content?path=home.md", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, get)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("# Home")) || !bytes.Contains(response.Body.Bytes(), []byte(`"id":`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"pageType":"technical"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"updatedAt":`)) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("# Home")) || !bytes.Contains(response.Body.Bytes(), []byte(`"id":`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"pageType":"technical"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"owner":"Human"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"updatedAt":`)) {
 		t.Fatalf("get status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
@@ -176,7 +176,7 @@ func TestHandlerBrowsesDirectories(t *testing.T) {
 
 func TestHandlerUpdatesApplicationSettings(t *testing.T) {
 	service, _ := newTestService(t)
-	body, err := json.Marshal(ApplicationSettingsInput{PageTypes: defaultPageTypes()})
+	body, err := json.Marshal(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileHuman, FirstName: "Grace", LastName: "Hopper"}, AIPermissions: Permissions{View: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,61 @@ func TestHandlerUpdatesApplicationSettings(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	NewHandler(service).ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"id":"business"`)) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"id":"business"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"type":"human"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"firstName":"Grace"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"view":true`)) {
 		t.Fatalf("update settings status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerDoesNotAllowPageTypeConfiguration(t *testing.T) {
+	service, _ := newTestService(t)
+	request := httptest.NewRequest(http.MethodPut, "/api/settings/application", bytes.NewBufferString(`{"profile":{"type":"human","firstName":"","lastName":""},"aiPermissions":{"view":true,"create":false,"edit":false,"delete":false},"pageTypes":[]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerEnforcesAIReadOnlyPermissions(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "readable.md", Type: "document"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI}, AIPermissions: defaultAIPermissions()}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(service)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewBufferString(`{"path":"blocked.md","type":"document","content":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/documents/content?path=readable.md", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("view status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/documents?path=readable.md", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("delete status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	settingsBody, err := json.Marshal(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI}, AIPermissions: Permissions{View: true, Create: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPut, "/api/settings/application", bytes.NewReader(settingsBody))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("permission update status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
