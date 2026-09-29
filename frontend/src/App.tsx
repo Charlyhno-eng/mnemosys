@@ -724,12 +724,13 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
   onCreateFolder: () => void;
 }) {
   const tx = (english: string, _french: string) => english;
+  const searchPlaceholder = searchMode === "names" ? "Search file and folder names…" : searchMode === "lexical" ? "Search metadata or content (e.g. team: Robotic)…" : "Search titles and Markdown content…";
   return <div className="dashboard">
     <div className="dashboard-heading">
       <span className="eyebrow">{tx("KNOWLEDGE BASE", "BASE DE CONNAISSANCES")}</span>
       <h1>{space ? space.name : tx("Hello, what are you looking for?", "Bonjour, que cherchez-vous ?")}</h1>
       <p>{space ? `${documents(space.children ?? []).length} ${tx("document(s) in this space", "document(s) dans cet espace")}` : tx("Browse your team spaces or search the documentation directly.", "Parcourez les espaces de votre équipe ou recherchez directement une documentation.")}</p>
-      <div className="home-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder={tx("Search titles and Markdown content…", "Rechercher dans les titres et le contenu Markdown…")} />{searchLoading && <i className="saving-spinner" />}{query && <button onClick={() => onQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
+      <div className="home-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder={searchPlaceholder} />{searchLoading && <i className="saving-spinner" />}{query && <button onClick={() => onQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
       <div className="search-mode-toggle" aria-label="Search mode"><button className={searchMode === "names" ? "active" : ""} onClick={() => onSearchMode("names")}><strong>Names</strong><span>File and folder names</span></button><button className={searchMode === "lexical" ? "active" : ""} onClick={() => onSearchMode("lexical")}><strong>Metadata</strong><span>Exact terms across metadata and content</span></button><button className={searchMode === "hybrid" ? "active" : ""} onClick={() => onSearchMode("hybrid")}><strong>Semantic</strong><span>Lexical + semantic context</span></button></div>
     </div>
 

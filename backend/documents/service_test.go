@@ -520,6 +520,103 @@ func TestSearchFindsFileAndFolderNamesWithoutMatchingMarkdownContent(t *testing.
 	}
 }
 
+func TestSearchFindsEveryFrontmatterField(t *testing.T) {
+	service, root := newTestService(t)
+	if err := os.Mkdir(filepath.Join(root, "robot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const documentID = "2cc1c695-bf21-42a9-85ec-124ad0472e00"
+	const target = `---
+id: "2cc1c695-bf21-42a9-85ec-124ad0472e00"
+name: "3"
+page_type: "general"
+owner: "Charly Mercier"
+team: "Robotic"
+application: "app2"
+folder_path: "~/robot"
+ai_editable: false
+last_modified_by: "human"
+ai_touched: false
+updated_at: "2026-09-29T15:45:27Z"
+---
+
+# A plain page`
+	const other = `---
+id: "11111111-1111-4111-8111-111111111111"
+name: "Else"
+page_type: "technical"
+owner: "Another owner"
+team: "Other team"
+application: ""
+folder_path: "~"
+ai_editable: true
+last_modified_by: "ai"
+ai_touched: true
+updated_at: "2025-01-02T01:02:03Z"
+---
+
+Robotic false appears only in this page's body.`
+	for path, content := range map[string]string{"robot/record.md": target, "other.md": other} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queries := []struct {
+		field string
+		value string
+		query string
+	}{
+		{"id", documentID, "id: \"" + documentID + "\""},
+		{"name", "3", `name: "3"`},
+		{"page_type", "general", "page_type: general"},
+		{"owner", "Charly Mercier", `owner: "Charly Mercier"`},
+		{"team", "Robotic", "TEAM: Robotic"},
+		{"application", "app2", "application: app2"},
+		{"folder_path", "~/robot", "folder_path: ~/robot"},
+		{"ai_editable", "false", "ai_editable: false"},
+		{"last_modified_by", "human", "last_modified_by: human"},
+		{"ai_touched", "false", "ai_touched: false"},
+		{"updated_at", "2026-09-29T15:45:27Z", "updated_at: 2026-09-29T15:45:27Z"},
+	}
+	for _, query := range queries {
+		t.Run(query.field, func(t *testing.T) {
+			unqualified, err := service.Search(query.value, SearchLexical, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, result := range unqualified.Results {
+				if result.Path == "robot/record.md" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("search by value %q missed the page: %#v", query.value, unqualified.Results)
+			}
+
+			qualified, err := service.Search(query.query, SearchLexical, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(qualified.Results) != 1 || qualified.Results[0].Path != "robot/record.md" || !strings.HasPrefix(qualified.Results[0].Snippet, query.field+": ") {
+				t.Fatalf("search by field %q = %#v", query.query, qualified.Results)
+			}
+		})
+	}
+	empty, err := service.Search(`application: ""`, SearchLexical, "")
+	if err != nil || len(empty.Results) != 1 || empty.Results[0].Path != "other.md" {
+		t.Fatalf("empty metadata value results = %#v, %v", empty.Results, err)
+	}
+	hybrid, err := service.Search("team: Robotic", SearchHybrid, "")
+	if err != nil || len(hybrid.Results) != 1 || hybrid.Results[0].Path != "robot/record.md" {
+		t.Fatalf("qualified hybrid results = %#v, %v", hybrid.Results, err)
+	}
+	wrongField, err := service.Search("team: app2", SearchLexical, "")
+	if err != nil || len(wrongField.Results) != 0 {
+		t.Fatalf("cross-field results = %#v, %v", wrongField.Results, err)
+	}
+}
+
 func TestSearchValidatesModeQueryAndScope(t *testing.T) {
 	service, _ := newTestService(t)
 	if _, err := service.Search("query", "unknown", ""); !errors.Is(err, ErrInvalidSearch) {

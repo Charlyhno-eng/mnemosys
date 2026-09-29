@@ -164,6 +164,28 @@ func TestHandlerReturnsNameSearchResults(t *testing.T) {
 	}
 }
 
+func TestHandlerSearchesFrontmatterField(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "metadata.md", Type: "document", Content: "# Page"}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("metadata.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(document.Content, `team: ""`, `team: "Robotic"`, 1)
+	if err := service.Update(UpdateInput{Path: "metadata.md", Content: &updated, BaseRevision: document.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/documents/search?q="+url.QueryEscape("team: Robotic")+"&mode=lexical", nil)
+	NewHandler(service).ServeHTTP(response, request)
+	var result SearchResponse
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || len(result.Results) != 1 || result.Results[0].Path != "metadata.md" || result.Results[0].Snippet != "team: Robotic" {
+		t.Fatalf("metadata search status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHandlerRejectsUnknownJSONFields(t *testing.T) {
 	service, _ := newTestService(t)
 	handler := NewHandler(service)

@@ -3,6 +3,7 @@ package documents
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -17,6 +18,13 @@ type indexedDocument struct {
 	frequency         map[string]int
 	semanticTokens    []string
 	semanticFrequency map[string]int
+	metadataFields    map[string]string
+	metadataText      string
+}
+
+var searchableMetadataFields = []string{
+	"id", "name", "page_type", "owner", "team", "application", "folder_path",
+	"ai_editable", "last_modified_by", "ai_touched", "updated_at",
 }
 
 func (r *repository) search(query string, mode SearchMode, scope string) ([]SearchResult, error) {
@@ -31,12 +39,15 @@ func (r *repository) search(query string, mode SearchMode, scope string) ([]Sear
 	if mode == SearchNames {
 		return searchNodeNames(nodes, query), nil
 	}
+	field, fieldValue, fieldQuery := parseMetadataFieldQuery(query)
 	indexed := make([]indexedDocument, 0, len(nodes))
 	for _, node := range nodes {
 		document := Document{}
 		body := ""
 		var semanticTokens []string
 		var semanticFrequency map[string]int
+		var metadataFields map[string]string
+		metadataText := ""
 		if node.Type == "document" {
 			var err error
 			document, err = r.get(node.Path)
@@ -46,22 +57,21 @@ func (r *repository) search(query string, mode SearchMode, scope string) ([]Sear
 			body = markdownBody(document.Content)
 			semanticTokens = searchTokens(strings.Join([]string{node.Name, node.Title, body}, " "))
 			semanticFrequency = tokenFrequency(semanticTokens)
+			metadataFields = documentSearchMetadata(document.Content)
+			metadataText = metadataSearchText(metadataFields)
 		}
-		tokens := searchTokens(strings.Join([]string{node.Name, node.Path, node.Title, string(node.PageType), node.Owner, node.Application, body}, " "))
-		indexed = append(indexed, indexedDocument{node: node, document: document, body: body, tokens: tokens, frequency: tokenFrequency(tokens), semanticTokens: semanticTokens, semanticFrequency: semanticFrequency})
+		tokens := searchTokens(strings.Join([]string{node.Name, node.Path, node.Title, metadataText, body}, " "))
+		indexed = append(indexed, indexedDocument{node: node, document: document, body: body, tokens: tokens, frequency: tokenFrequency(tokens), semanticTokens: semanticTokens, semanticFrequency: semanticFrequency, metadataFields: metadataFields, metadataText: metadataText})
 	}
 
 	queryTokens := searchTokens(query)
-	if len(queryTokens) == 0 {
-		return []SearchResult{}, nil
-	}
 	semanticScores := make([]float64, len(indexed))
-	if mode == SearchHybrid {
+	if mode == SearchHybrid && !fieldQuery {
 		semanticScores = semanticSearchScores(indexed, queryTokens)
 	}
 	results := make([]SearchResult, 0)
 	for index, candidate := range indexed {
-		lexical := lexicalSearchScore(candidate, query, queryTokens)
+		lexical := lexicalSearchScore(candidate, query, queryTokens, field, fieldValue)
 		semantic := semanticScores[index]
 		if lexical <= 0 && semantic < semanticMatchThreshold {
 			continue
@@ -77,13 +87,17 @@ func (r *repository) search(query string, mode SearchMode, scope string) ([]Sear
 		if title == "" {
 			title = strings.TrimSuffix(candidate.node.Name, ".md")
 		}
+		snippet := searchSnippet(candidate.body, query, queryTokens)
+		if fieldQuery {
+			snippet = truncateSearchSnippet(field + ": " + candidate.metadataFields[field])
+		}
 		results = append(results, SearchResult{
 			Path:       candidate.node.Path,
 			Type:       candidate.node.Type,
 			Name:       candidate.node.Name,
 			Title:      title,
 			PageType:   candidate.document.PageType,
-			Snippet:    searchSnippet(candidate.body, query, queryTokens),
+			Snippet:    snippet,
 			Score:      lexical + semantic*4,
 			MatchTypes: matchTypes,
 		})
@@ -98,6 +112,51 @@ func (r *repository) search(query string, mode SearchMode, scope string) ([]Sear
 		results = results[:50]
 	}
 	return results, nil
+}
+
+func documentSearchMetadata(content string) map[string]string {
+	return map[string]string{
+		"id":               frontmatterValue(content, frontmatterIDPattern),
+		"name":             frontmatterValue(content, frontmatterNamePattern),
+		"page_type":        frontmatterValue(content, frontmatterPageTypePattern),
+		"owner":            frontmatterValue(content, frontmatterOwnerPattern),
+		"team":             frontmatterValue(content, frontmatterTeamPattern),
+		"application":      frontmatterValue(content, frontmatterApplicationPattern),
+		"folder_path":      frontmatterValue(content, frontmatterFolderPathPattern),
+		"ai_editable":      frontmatterValue(content, frontmatterAIEditablePattern),
+		"last_modified_by": frontmatterValue(content, frontmatterModifiedByPattern),
+		"ai_touched":       frontmatterValue(content, frontmatterAITouchedPattern),
+		"updated_at":       frontmatterValue(content, frontmatterUpdatedAtPattern),
+	}
+}
+
+func metadataSearchText(fields map[string]string) string {
+	values := make([]string, 0, len(searchableMetadataFields))
+	for _, field := range searchableMetadataFields {
+		values = append(values, fields[field])
+	}
+	return strings.Join(values, "\n")
+}
+
+func parseMetadataFieldQuery(query string) (field, value string, ok bool) {
+	key, rawValue, found := strings.Cut(query, ":")
+	if !found {
+		return "", "", false
+	}
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, candidate := range searchableMetadataFields {
+		if key != candidate {
+			continue
+		}
+		value = strings.TrimSpace(rawValue)
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		} else if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+			value = value[1 : len(value)-1]
+		}
+		return key, value, true
+	}
+	return "", "", false
 }
 
 func searchNodeNames(nodes []Node, query string) []SearchResult {
@@ -160,10 +219,29 @@ func flattenSearchNodes(nodes []Node, scope string) []Node {
 	return result
 }
 
-func lexicalSearchScore(candidate indexedDocument, rawQuery string, queryTokens []string) float64 {
+func lexicalSearchScore(candidate indexedDocument, rawQuery string, queryTokens []string, field, fieldValue string) float64 {
+	if field != "" {
+		if candidate.node.Type != "document" {
+			return 0
+		}
+		value := candidate.metadataFields[field]
+		if fieldValue == "" {
+			if value == "" {
+				return 20
+			}
+			return 0
+		}
+		if strings.EqualFold(value, fieldValue) {
+			return 20
+		}
+		if strings.Contains(strings.ToLower(value), strings.ToLower(fieldValue)) {
+			return 12
+		}
+		return 0
+	}
 	title := strings.ToLower(strings.TrimSuffix(candidate.node.Name, ".md") + " " + candidate.node.Title)
 	path := strings.ToLower(candidate.node.Path)
-	metadata := strings.ToLower(strings.Join([]string{string(candidate.node.PageType), candidate.node.Owner, candidate.node.Application}, " "))
+	metadata := strings.ToLower(candidate.metadataText)
 	body := strings.ToLower(candidate.body)
 	phrase := strings.ToLower(strings.TrimSpace(rawQuery))
 	score := 0.0
@@ -176,6 +254,9 @@ func lexicalSearchScore(candidate indexedDocument, rawQuery string, queryTokens 
 		}
 		if strings.Contains(body, phrase) {
 			score += 4
+		}
+		if strings.Contains(metadata, phrase) {
+			score += 8
 		}
 	}
 	for _, token := range queryTokens {
@@ -326,11 +407,15 @@ func searchSnippet(body, query string, queryTokens []string) string {
 			}
 		}
 	}
-	runes := []rune(selected)
+	return truncateSearchSnippet(selected)
+}
+
+func truncateSearchSnippet(value string) string {
+	runes := []rune(value)
 	if len(runes) > 220 {
 		return string(runes[:220]) + "…"
 	}
-	return selected
+	return value
 }
 
 var searchStopWords = map[string]bool{

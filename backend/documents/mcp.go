@@ -29,7 +29,7 @@ func mcpTools() []mcpTool {
 		return mcpTool{name, description, map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}}
 	}
 	return []mcpTool{
-		tool("search", "Search page/folder names, metadata and content. mode: names (file/folder paths only), lexical (default), or hybrid (lexical plus semantic ranking); scope: optional vault-relative folder.", []string{"query"}, "query", "mode", "scope"),
+		tool("search", "Search page/folder names, metadata and content. mode: names (file/folder paths only), lexical (default), or hybrid (lexical plus semantic ranking). Search any frontmatter value, or use field: value to target one metadata field; scope: optional vault-relative folder.", []string{"query"}, "query", "mode", "scope"),
 		tool("read", "Read a Markdown page including frontmatter and its revision.", []string{"path"}, "path"),
 		tool("explore", "Return the recursive page/folder tree, optionally below a vault-relative folder path.", []string{}, "path"),
 		tool("create", "Create a page or folder. type: document or directory. Parents must exist. pageType defaults to general. Requires AI create permission.", []string{"path", "type"}, "path", "type", "content", "pageType"),
