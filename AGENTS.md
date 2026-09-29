@@ -9,19 +9,23 @@ Mnemosys is an enterprise memory and knowledge platform. It centralizes an organ
 - A filesystem-backed Markdown vault with a configurable storage location and no database.
 - A nested page and folder tree with create, read, edit, rename, move, drag-and-drop, and recursive delete operations.
 - A Markdown editor with preview mode, autosave, undo/redo history, formatting tools, image upload, and drag-and-drop media insertion.
-- YAML-style frontmatter containing a stable immutable UUID, name, description, page type, owner name, last-modifying profile, persistent AI-touch marker, and last-modified timestamp for every page. Missing metadata and duplicate IDs are repaired at startup.
+- Document metadata is maintained exclusively in each Markdown file's frontmatter; the editor does not provide a metadata show/hide panel.
+- Markdown previews strip YAML frontmatter, including documents with UTF-8 BOM or CRLF line endings.
+- YAML-style frontmatter containing a stable immutable UUID, name, page type, owner name, team, application name, folder path, per-page AI edit opt-in, last-modifying profile, persistent AI-touch marker, and last-modified timestamp for every page. Legacy descriptions are removed, and missing metadata and duplicate IDs are repaired at startup.
 - Four built-in page types: General, Business documentation, Technical documentation, and Incident documentation.
 - Four code-owned page types and graph colors defined in `backend/documents/page_types.go` and exposed read-only to the frontend.
-- One active Human or AI profile, including first and last name, persisted in `config/config.toml`; Human is the default.
+- One active Human or AI profile, including first name, last name, and team, persisted in `config/config.toml`; Human is the default.
 - Backend-enforced AI permissions for view, create, edit, and delete. AI defaults to view-only, and only a Human profile can change these rights.
-- A knowledge graph showing folder hierarchy and explicit Obsidian-style `[[wiki links]]`, with search, filters, zoom, layout controls, and page-type colors.
+- A knowledge graph showing folder hierarchy and ordinary Obsidian-style `[[wiki links]]`, with search, filters, zoom, layout controls, and page-type colors.
 - Stable links using `[[id:<uuid>]]` or `[[<uuid>]]`, so references survive page renames and moves.
 - Backlinks and navigation through wiki links.
 - A dashboard and page tree with filtering across paths and page metadata.
+- Local lexical and hybrid semantic search across page metadata and Markdown content.
 - A right-side, scrollable settings drawer for the active profile, identity, AI permissions, and vault location.
 - An English-only interface.
 - A REST API for pages, folders, graph data, application settings, storage browsing, and media.
 - Backend protections for path traversal, symbolic links, invalid page types, malformed JSON, unsupported images, upload size limits, and concurrent mutations.
+- Revision-based concurrent editing that detects stale human or agent saves and preserves both the current version and the local draft for explicit resolution.
 - Backend unit and HTTP integration tests covering document lifecycle, metadata, stable IDs, graph relations, settings, storage, assets, invalid inputs, and concurrent access.
 
 ## Current stack
@@ -90,3 +94,19 @@ mnemosys/
 ```
 
 The backend is organized by feature. The current `documents` module keeps its models, HTTP handlers, business operations, filesystem persistence, configuration, graph construction, and tests together. Do not add database layers, workers, services, or modules that the current feature set does not need.
+
+## JEV Codex Pilot delivery log
+
+- Task 1: Added configurable profile teams and persisted team metadata to Markdown pages.
+- Task 2: Hid document metadata by default in the editor behind a Show metadata control.
+- Task 3: Removed description frontmatter and added application-relative folder path metadata.
+- Task 4: Added application metadata and default per-page AI edit protection with human-controlled opt-in.
+- Task 5: Added a home-page profile and access overview linked to persisted profile and AI permission management.
+- Task 6: Added reviewable AI Markdown proposals with diff, edit, accept, and reject actions before persistence.
+- Task 7: Added explicit AI work-item statuses and preserved proposal history after review outcomes.
+- Task 8: Added document and folder wiki links in the editor and graph.
+- Task 9: Added local lexical and hybrid semantic search without replacing classic search.
+- Task 10: Added revision-based concurrent editing with explicit conflict review and resolution.
+- Task 11: Removed the metadata show/hide panel so document metadata remains exclusively in Markdown frontmatter.
+- Task 12: Fixed Markdown previews so YAML frontmatter is never rendered as document content.
+- Task 13: Restored ordinary wiki links throughout the editor and graph.

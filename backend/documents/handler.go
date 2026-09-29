@@ -14,6 +14,7 @@ import (
 // NewHandler exposes document, asset, and storage configuration endpoints.
 func NewHandler(service *Service) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", service.serveMCP)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -79,6 +80,46 @@ func NewHandler(service *Service) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, document)
 	})
+	mux.HandleFunc("GET /api/documents/search", func(w http.ResponseWriter, r *http.Request) {
+		results, err := service.Search(r.URL.Query().Get("q"), SearchMode(r.URL.Query().Get("mode")), r.URL.Query().Get("scope"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, results)
+	})
+	mux.HandleFunc("GET /api/documents/proposals", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, service.Proposals())
+	})
+	mux.HandleFunc("POST /api/documents/proposals/{id}/accept", func(w http.ResponseWriter, r *http.Request) {
+		var decision ProposalDecision
+		if !decodeJSON(w, r, &decision) {
+			return
+		}
+		if err := service.AcceptProposal(r.PathValue("id"), decision.Content); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("PATCH /api/documents/proposals/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var input ProposalStatusInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := service.SetProposalStatus(r.PathValue("id"), input.Status); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /api/documents/proposals/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := service.RejectProposal(r.PathValue("id")); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("POST /api/documents", func(w http.ResponseWriter, r *http.Request) {
 		var input CreateInput
 		if !decodeJSON(w, r, &input) {
@@ -95,7 +136,12 @@ func NewHandler(service *Service) http.Handler {
 		if !decodeJSON(w, r, &input) {
 			return
 		}
-		if err := service.Update(input); err != nil {
+		if input.Content != nil && input.BaseRevision == "" {
+			writeError(w, ErrRevisionRequired)
+			return
+		}
+		result, err := service.UpdateWithResult(input)
+		if err != nil {
 			writeError(w, err)
 			return
 		}
@@ -103,7 +149,8 @@ func NewHandler(service *Service) http.Handler {
 		if input.NewPath != nil {
 			path = *input.NewPath
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"path": path})
+		result.Path = path
+		writeJSON(w, http.StatusOK, result)
 	})
 	mux.HandleFunc("DELETE /api/documents", func(w http.ResponseWriter, r *http.Request) {
 		if err := service.Delete(r.URL.Query().Get("path")); err != nil {
@@ -184,13 +231,22 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, ErrRevisionRequired):
+		status = http.StatusPreconditionRequired
+	case errors.Is(err, ErrEditConflict):
+		var conflict *EditConflictError
+		if errors.As(err, &conflict) {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "currentDocument": conflict.Current})
+			return
+		}
+		status = http.StatusConflict
 	case errors.Is(err, ErrForbidden):
 		status = http.StatusForbidden
 	case errors.Is(err, ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, ErrAlreadyExists):
 		status = http.StatusConflict
-	case errors.Is(err, ErrInvalidPath), errors.Is(err, ErrInvalidType), errors.Is(err, ErrInvalidPageType), errors.Is(err, ErrInvalidSettings), errors.Is(err, ErrInvalidAsset):
+	case errors.Is(err, ErrInvalidPath), errors.Is(err, ErrInvalidType), errors.Is(err, ErrInvalidPageType), errors.Is(err, ErrInvalidSettings), errors.Is(err, ErrInvalidAsset), errors.Is(err, ErrInvalidSearch):
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
@@ -203,7 +259,7 @@ func cors(next http.Handler) http.Handler {
 		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		}
 		if r.Method == http.MethodOptions {

@@ -6,7 +6,7 @@ import { Icons } from "./components/Icons";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownPreview } from "./components/MarkdownPreview";
-import { api, type ApplicationSettings, type DirectoryListing, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type Permissions, type ProfileSettings, type StorageSettings } from "./lib/api";
+import { APIError, api, type ApplicationSettings, type DirectoryListing, type Document, type DocumentProposal, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type Permissions, type ProfileSettings, type ProposalStatus, type SearchMode, type SearchResult, type StorageSettings } from "./lib/api";
 
 type Modal =
   | { kind: "create"; type: Node["type"]; parent: string }
@@ -29,6 +29,9 @@ const pageTypeDescription = (type: PageTypeDefinition) => type.description;
 const parentPath = (path: string) => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 const baseName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 const joinPath = (parent: string, name: string) => parent ? `${parent}/${name}` : name;
+function wikiTarget(value: string) {
+  return value;
+}
 
 function folders(nodes: Node[]): Node[] {
   return nodes.flatMap((node) => node.type === "directory" ? [node, ...folders(node.children ?? [])] : []);
@@ -52,7 +55,7 @@ function resolveWikiNode(nodes: Node[], rawTarget: string): Node | null {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function documentProperty(content: string, key: "name" | "description" | "page_type" | "owner", fallback = "") {
+function documentProperty(content: string, key: "ai_editable", fallback = "") {
   if (!content.startsWith("---\n")) return fallback;
   const closing = content.indexOf("\n---", 4);
   if (closing < 0) return fallback;
@@ -76,7 +79,7 @@ function filterTree(nodes: Node[], query: string): Node[] {
   if (!normalized) return nodes;
   return nodes.flatMap((node) => {
     if (node.type === "document") {
-      const metadata = [node.name, node.path, node.title, node.description, node.pageType, node.owner, node.lastModifiedBy, node.updatedAt].filter(Boolean).join(" ").toLocaleLowerCase();
+      const metadata = [node.name, node.path, node.title, node.pageType, node.owner, node.application, node.lastModifiedBy, node.updatedAt].filter(Boolean).join(" ").toLocaleLowerCase();
       return metadata.includes(normalized) ? [node] : [];
     }
     const children = filterTree(node.children ?? [], query);
@@ -96,7 +99,7 @@ export function App() {
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [mode, setMode] = useState<"edit" | "preview">("preview");
   const [loading, setLoading] = useState(true);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "proposed" | "conflict" | "error">("idle");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [modal, setModal] = useState<Modal>(null);
   const [modalValue, setModalValue] = useState("");
@@ -107,24 +110,30 @@ export function App() {
   const [query, setQuery] = useState("");
   const [rootDrop, setRootDrop] = useState(false);
   const [homeQuery, setHomeQuery] = useState("");
+  const [homeSearchMode, setHomeSearchMode] = useState<SearchMode>("lexical");
+  const [homeResults, setHomeResults] = useState<SearchResult[]>([]);
+  const [homeSearchLoading, setHomeSearchLoading] = useState(false);
+  const [homeSearchError, setHomeSearchError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [imageDrag, setImageDrag] = useState(false);
   const [storage, setStorage] = useState<StorageSettings | null>(null);
-  const [applicationSettings, setApplicationSettings] = useState<ApplicationSettings>({ pageTypes: fallbackPageTypes, profile: { type: "human", firstName: "", lastName: "" }, aiPermissions: { view: true, create: false, edit: false, delete: false } });
-  const [draftProfile, setDraftProfile] = useState<ProfileSettings>({ type: "human", firstName: "", lastName: "" });
+  const [applicationSettings, setApplicationSettings] = useState<ApplicationSettings>({ pageTypes: fallbackPageTypes, profile: { type: "human", firstName: "", lastName: "", team: "" }, aiPermissions: { view: true, create: false, edit: false, delete: false } });
+  const [draftProfile, setDraftProfile] = useState<ProfileSettings>({ type: "human", firstName: "", lastName: "", team: "" });
   const [draftPermissions, setDraftPermissions] = useState<Permissions>({ view: true, create: false, edit: false, delete: false });
   const [storageOpen, setStorageOpen] = useState(false);
   const [storagePath, setStoragePath] = useState("");
   const [storageBusy, setStorageBusy] = useState(false);
   const [directoryListing, setDirectoryListing] = useState<DirectoryListing | null>(null);
   const [directoryBusy, setDirectoryBusy] = useState(false);
+  const [proposals, setProposals] = useState<DocumentProposal[]>([]);
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
-  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  const [documentID, setDocumentID] = useState<string | null>(null);
+  const [revision, setRevision] = useState("");
+  const [editConflict, setEditConflict] = useState<Document | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const historyRef = useRef<EditHistory>({ past: [], present: "", future: [], lastTypingAt: 0 });
+  const saveInFlightRef = useRef(false);
   const pageTypes = applicationSettings.pageTypes;
   const tx = useCallback((english: string, _french: string) => english, []);
 
@@ -133,21 +142,24 @@ export function App() {
   const visibleTree = useMemo(() => filterTree(tree, query), [tree, query]);
   const spaceNode = useMemo(() => findNode(tree, spacePath), [tree, spacePath]);
   const homeNodes = spaceNode?.type === "directory" ? spaceNode.children ?? [] : tree;
-  const homeDocuments = useMemo(() => documents(spaceNode?.type === "directory" ? [spaceNode] : tree), [spaceNode, tree]);
-  const homeResults = useMemo(() => {
-    const normalized = homeQuery.trim().toLocaleLowerCase();
-    return normalized ? homeDocuments.filter((node) => [node.name, node.path, node.title, node.description, node.pageType, node.owner, node.lastModifiedBy, node.updatedAt].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalized)) : [];
-  }, [homeDocuments, homeQuery]);
   const dirty = loadedPath === selectedPath && content !== savedContent;
-  const properties = useMemo(() => ({ name: documentProperty(content, "name", selectedPath ? baseName(selectedPath).replace(/\.md$/, "") : ""), description: documentProperty(content, "description"), pageType: documentProperty(content, "page_type", "general") as PageType, owner: documentProperty(content, "owner", "Human") }), [content, selectedPath]);
+  const aiEditable = documentProperty(content, "ai_editable", "false") === "true";
   const activePermissions = applicationSettings.profile.type === "human" ? { view: true, create: true, edit: true, delete: true } : applicationSettings.aiPermissions;
-  const backlinks = useMemo(() => selectedPath ? graph.edges.filter((edge) => edge.type === "link" && edge.target === selectedPath).map((edge) => allEntries.find((node) => node.path === edge.source)).filter((node): node is Node => Boolean(node)) : [], [allEntries, graph.edges, selectedPath]);
+  const canEditDocument = activePermissions.edit && (applicationSettings.profile.type === "human" || aiEditable);
+  const backlinks = useMemo(() => selectedPath ? graph.edges.flatMap((edge) => {
+    if (edge.type === "hierarchy" || edge.target !== selectedPath) return [];
+    const node = allEntries.find((entry) => entry.path === edge.source);
+    return node ? [node] : [];
+  }) : [], [allEntries, graph.edges, selectedPath]);
 
   const flash = useCallback((message: string, tone: Notice["tone"] = "success") => setNotice({ message, tone }), []);
   const refreshTree = useCallback(async () => {
     const [nextTree, nextGraph] = await Promise.all([api.tree(), api.graph()]);
     setTree(nextTree);
     setGraph(nextGraph);
+  }, []);
+  const refreshProposals = useCallback(async () => {
+    setProposals(await api.proposals());
   }, []);
 
   useEffect(() => { refreshTree().catch((error) => flash(error.message, "error")).finally(() => setLoading(false)); }, [refreshTree, flash]);
@@ -158,6 +170,7 @@ export function App() {
       setApplicationSettings(appSettings);
       setDraftProfile(appSettings.profile);
       setDraftPermissions(appSettings.aiPermissions);
+      api.proposals().then(setProposals).catch(() => setProposals([]));
       document.documentElement.lang = "en";
     }).catch((error) => flash(error instanceof Error ? error.message : "Settings are unavailable.", "error"));
   }, [flash]);
@@ -168,45 +181,114 @@ export function App() {
   }, [notice]);
 
   useEffect(() => {
+    const query = homeQuery.trim();
+    if (!query) {
+      setHomeResults([]);
+      setHomeSearchLoading(false);
+      setHomeSearchError("");
+      return;
+    }
+    let active = true;
+    setHomeSearchLoading(true);
+    setHomeSearchError("");
+    const timer = window.setTimeout(() => {
+      api.search(query, homeSearchMode, spaceNode?.path).then((response) => {
+        if (active) setHomeResults(response.results);
+      }).catch((error) => {
+        if (active) {
+          setHomeResults([]);
+          setHomeSearchError(error instanceof Error ? error.message : "Search is unavailable.");
+        }
+      }).finally(() => { if (active) setHomeSearchLoading(false); });
+    }, 250);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [homeQuery, homeSearchMode, spaceNode?.path]);
+
+  useEffect(() => {
     let active = true;
     setLinkPickerOpen(false);
-    if (!selectedPath) { setLoadedPath(null); resetHistory(""); setSavedContent(""); setUpdatedAt(null); setDocumentID(null); return; }
+    if (!selectedPath) { setLoadedPath(null); resetHistory(""); setSavedContent(""); setRevision(""); setEditConflict(null); return; }
     setLoadedPath(null);
     api.get(selectedPath).then((document) => {
       if (!active) return;
       resetHistory(document.content);
       setSavedContent(document.content);
       setLoadedPath(document.path);
-      setUpdatedAt(document.updatedAt);
-      setDocumentID(document.id);
+      setRevision(document.revision);
+      setEditConflict(null);
       setSaveStatus("idle");
       setMode("preview");
     }).catch((error) => { if (active) flash(error.message, "error"); });
     return () => { active = false; };
   }, [selectedPath, flash]);
 
-  const save = useCallback(async (path = selectedPath, value = content) => {
-    if (!path || loadedPath !== path) return false;
+  const save = useCallback(async (path = selectedPath, value = content, baseRevision = revision) => {
+    if (!path || loadedPath !== path || !baseRevision || saveInFlightRef.current) return false;
+    saveInFlightRef.current = true;
     setSaveStatus("saving");
     try {
-      await api.update(path, value);
-      setSavedContent(value);
-      void api.get(path).then((document) => { setUpdatedAt(document.updatedAt); setDocumentID(document.id); }).catch(() => undefined);
-      setSaveStatus("saved");
+      const result = await api.update(path, value, baseRevision);
+      const savedDocument = result.document;
+      if (savedDocument) {
+        setRevision(savedDocument.revision);
+        if (result.proposal) {
+          setSavedContent(value);
+        } else if (historyRef.current.present === value) {
+          resetHistory(savedDocument.content);
+          setSavedContent(savedDocument.content);
+        } else {
+          setSavedContent(value);
+        }
+      } else {
+        setSavedContent(value);
+      }
+      setEditConflict(null);
+      if (result.proposal) {
+        setSaveStatus("proposed");
+        void refreshProposals().catch(() => undefined);
+        flash("AI change submitted as a proposal.");
+      } else {
+        setSaveStatus("saved");
+      }
       void refreshTree().catch(() => undefined);
       return true;
     } catch (error) {
+      if (error instanceof APIError && error.status === 409 && error.currentDocument) {
+        setEditConflict(error.currentDocument);
+        setSaveStatus("conflict");
+        flash("This page was changed elsewhere. Review the concurrent version before saving.", "error");
+        return false;
+      }
       setSaveStatus("error");
       flash(error instanceof Error ? error.message : tx("Unable to save.", "Impossible d’enregistrer."), "error");
       return false;
+    } finally {
+      saveInFlightRef.current = false;
     }
-  }, [content, flash, loadedPath, refreshTree, selectedPath, tx]);
+  }, [content, flash, loadedPath, refreshProposals, refreshTree, revision, selectedPath, tx]);
 
   useEffect(() => {
-    if (!dirty || !selectedPath) return;
+    if (!dirty || !selectedPath || editConflict || saveStatus === "saving") return;
     const timer = window.setTimeout(() => void save(selectedPath, content), 800);
     return () => window.clearTimeout(timer);
-  }, [content, dirty, save, selectedPath]);
+  }, [content, dirty, editConflict, save, saveStatus, selectedPath]);
+
+  function loadConcurrentVersion() {
+    if (!editConflict) return;
+    resetHistory(editConflict.content);
+    setSavedContent(editConflict.content);
+    setRevision(editConflict.revision);
+    setEditConflict(null);
+    setSaveStatus("idle");
+  }
+
+  function overwriteConcurrentVersion() {
+    if (!editConflict || !selectedPath) return;
+    const currentRevision = editConflict.revision;
+    setRevision(currentRevision);
+    setEditConflict(null);
+    void save(selectedPath, content, currentRevision);
+  }
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -378,19 +460,8 @@ export function App() {
     window.requestAnimationFrame(() => { editor.focus(); editor.setSelectionRange(start, start + snippet.length); });
   }
 
-  function setDocumentProperty(key: "name" | "description", value: string) {
-    let next = historyRef.current.present;
-    if (!next.startsWith("---\n") || next.indexOf("\n---", 4) < 0) {
-      const name = selectedPath ? baseName(selectedPath).replace(/\.md$/, "") : "Untitled";
-      next = `---\nname: ${JSON.stringify(name)}\ndescription: ""\n---\n\n${next}`;
-    }
-    const expression = new RegExp(`^${key}\\s*:.*$`, "m");
-    if (expression.test(next)) next = next.replace(expression, `${key}: ${JSON.stringify(value)}`);
-    else next = next.replace("\n---", `\n${key}: ${JSON.stringify(value)}\n---`);
-    changeContent(next, true);
-  }
-
   function openWikiLink(target: string) {
+    target = wikiTarget(target);
     const stableID = target.toLowerCase().startsWith("id:") ? target.slice(3) : target;
     const stableNode = graph.nodes.find((node) => node.documentId?.toLowerCase() === stableID.toLowerCase());
     if (stableNode) { openGraphNode(stableNode); return; }
@@ -408,7 +479,9 @@ export function App() {
   function insertWikiLink(node: Node) {
     const current = historyRef.current.present;
     const stableID = node.type === "document" ? graph.nodes.find((entry) => entry.id === node.path)?.documentId : undefined;
-    const token = stableID ? `[[id:${stableID}|${node.name.replace(/\.md$/, "")}]]` : `[[${node.path}]]`;
+    const target = stableID ? `id:${stableID}` : node.path;
+    const label = node.name.replace(/\.md$/, "");
+    const token = `[[${target}|${label}]]`;
     const editor = editorRef.current;
     if (mode === "edit" && editor) {
       const start = editor.selectionStart;
@@ -463,12 +536,37 @@ export function App() {
       setStorage(storageSettings);
       setStoragePath(storageSettings.path);
       setApplicationSettings(appSettings);
+      setProposals(await api.proposals());
       setStorageOpen(false);
       setSearchParams({});
       await refreshTree();
       flash("Settings saved.");
     } catch (error) { flash(error instanceof Error ? error.message : tx("Settings could not be saved.", "Impossible d’enregistrer les paramètres."), "error"); }
     finally { setStorageBusy(false); }
+  }
+
+  async function acceptProposal(id: string, content?: string) {
+    try {
+      await api.acceptProposal(id, content);
+      await Promise.all([refreshProposals(), refreshTree()]);
+      flash("AI proposal accepted.");
+    } catch (error) { flash(error instanceof Error ? error.message : "Unable to accept proposal.", "error"); }
+  }
+
+  async function rejectProposal(id: string) {
+    try {
+      await api.rejectProposal(id);
+      await refreshProposals();
+      flash("AI proposal rejected.");
+    } catch (error) { flash(error instanceof Error ? error.message : "Unable to reject proposal.", "error"); }
+  }
+
+  async function setProposalStatus(id: string, status: ProposalStatus) {
+    try {
+      await api.setProposalStatus(id, status);
+      await refreshProposals();
+      flash(`AI proposal marked ${status.replace(/_/g, " ")}.`);
+    } catch (error) { flash(error instanceof Error ? error.message : "Unable to update proposal status.", "error"); }
   }
 
   async function browseStorage(path?: string) {
@@ -489,7 +587,7 @@ export function App() {
   }
 
   const crumbs = graphOpen ? [tx("Graph", "Graphe")] : selectedPath?.split("/") ?? (spacePath ? spacePath.split("/") : []);
-  const statusLabel = saveStatus === "saving" ? tx("Saving…", "Enregistrement…") : saveStatus === "error" ? tx("Save error", "Erreur d’enregistrement") : dirty ? tx("Unsaved changes", "Modifications en attente") : tx("Saved", "Enregistré");
+  const statusLabel = saveStatus === "saving" ? tx("Saving…", "Enregistrement…") : saveStatus === "proposed" ? tx("Proposal pending review", "Proposition en attente") : saveStatus === "conflict" ? "Concurrent edit" : saveStatus === "error" ? tx("Save error", "Erreur d’enregistrement") : dirty ? tx("Unsaved changes", "Modifications en attente") : tx("Saved", "Enregistré");
 
   return <main className="app-shell">
     <aside className="sidebar">
@@ -519,8 +617,8 @@ export function App() {
       {graphOpen ? <KnowledgeGraph graph={graph} pageTypes={pageTypes} onOpen={openGraphNode} /> : selectedPath ? <>
         <div className="editor-toolbar">
           <div className="toolbar-left">
-            <div className="mode-switch"><button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Icons.eye />{tx("Preview", "Aperçu")}</button><button className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")} disabled={!activePermissions.edit}><Icons.edit />{tx("Edit", "Modifier")}</button></div>
-            {activePermissions.edit && <div className="link-control"><button className={`link-button ${linkPickerOpen ? "active" : ""}`} onClick={() => setLinkPickerOpen((open) => !open)}><Icons.link />{tx("Link", "Relier")}</button>{linkPickerOpen && <LinkPicker nodes={allEntries.filter((node) => node.path !== selectedPath)} onSelect={insertWikiLink} onClose={() => setLinkPickerOpen(false)} />}</div>}
+          <div className="mode-switch"><button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Icons.eye />{tx("Preview", "Aperçu")}</button><button className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")} disabled={!canEditDocument}><Icons.edit />{tx("Edit", "Modifier")}</button></div>
+            {canEditDocument && <div className="link-control"><button className={`link-button ${linkPickerOpen ? "active" : ""}`} onClick={() => setLinkPickerOpen((open) => !open)}><Icons.link />{tx("Link", "Relier")}</button>{linkPickerOpen && <LinkPicker nodes={allEntries.filter((node) => node.path !== selectedPath)} onSelect={insertWikiLink} onClose={() => setLinkPickerOpen(false)} />}</div>}
             {mode === "edit" && <div className="format-tools" aria-label="Markdown formatting">
               <button onClick={undo} disabled={historyRef.current.past.length === 0} title="Undo (Ctrl+Z)">↶</button>
               <button onClick={redo} disabled={historyRef.current.future.length === 0} title="Redo (Ctrl+Shift+Z)">↷</button>
@@ -546,14 +644,14 @@ export function App() {
               <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { if (event.target.files) void uploadImages(event.target.files); event.target.value = ""; }} />
             </div>}
           </div>
-          <div className={`save-state ${saveStatus === "error" ? "error" : ""}`}><span className={saveStatus === "saving" ? "saving-spinner" : ""}>{saveStatus !== "saving" && <Icons.check />}</span>{uploading ? tx("Uploading image…", "Import de l’image…") : statusLabel}</div>
+          <div className={`save-state ${saveStatus === "error" || saveStatus === "conflict" ? "error" : ""}`}><span className={saveStatus === "saving" ? "saving-spinner" : ""}>{saveStatus !== "saving" && <Icons.check />}</span>{uploading ? tx("Uploading image…", "Import de l’image…") : statusLabel}</div>
         </div>
         {loadedPath !== selectedPath ? <div className="document-loading"><span className="saving-spinner" />{tx("Loading document…", "Chargement du document…")}</div> : <>
-          <div className={`document-properties ${mode}`}><span>{tx("Properties", "Propriétés")}</span>{mode === "edit" ? <><label>{tx("Name", "Nom")}<input value={properties.name} onChange={(event) => setDocumentProperty("name", event.target.value)} /></label><label>Description<input value={properties.description} onChange={(event) => setDocumentProperty("description", event.target.value)} placeholder={tx("Add a description…", "Ajouter une description…")} /></label></> : <><strong>{properties.name}</strong>{properties.description && <small>{properties.description}</small>}</>}<small>Owner: {properties.owner}</small><span className="page-type-badge" style={{ color: pageTypes.find((type) => type.id === properties.pageType)?.color ?? "#62a6e8", background: `${pageTypes.find((type) => type.id === properties.pageType)?.color ?? "#62a6e8"}18` }}>{pageTypes.find((type) => type.id === properties.pageType) ? pageTypeLabel(pageTypes.find((type) => type.id === properties.pageType)!) : pageTypeLabel(pageTypes[0])}</span>{documentID && <code className="document-id" title="Stable page identifier">{documentID}</code>}{updatedAt && <time dateTime={updatedAt}>{tx("Updated", "Modifiée le")} {new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(updatedAt))}</time>}</div>
+          {editConflict && <section className="edit-conflict" role="alert"><div><strong>Concurrent changes detected</strong><p>Another person or agent saved this page after you opened it. Your draft is still in the editor.</p><small>Latest saved version from {new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(editConflict.updatedAt))}</small><details><summary>Review latest saved Markdown</summary><pre>{editConflict.content}</pre></details></div><div className="edit-conflict-actions"><button className="button secondary" onClick={loadConcurrentVersion}>Load latest version</button><button className="button conflict-overwrite" onClick={overwriteConcurrentVersion}>Save my draft over latest</button></div></section>}
           {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
-          <div className="backlinks"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>{node.path}</small></button>)}</div>}</div>
+          <div className="backlinks"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>Reference · {node.path}</small></button>)}</div>}</div>
         </>}
-      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} space={spaceNode} canCreate={activePermissions.create} onQuery={setHomeQuery} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
+      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} profile={applicationSettings.profile} aiPermissions={applicationSettings.aiPermissions} proposals={proposals} onManageProfile={openStoragePicker} onAcceptProposal={(id, content) => void acceptProposal(id, content)} onRejectProposal={(id) => void rejectProposal(id)} onStatusChange={(id, status) => void setProposalStatus(id, status)} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
     </section>
 
     {notice && <div className={`toast ${notice.tone}`}><span>{notice.tone === "success" ? <Icons.check /> : "!"}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Close"><Icons.x /></button></div>}
@@ -569,6 +667,7 @@ export function App() {
             {applicationSettings.profile.type === "ai" && <small className="settings-error">An AI profile cannot promote itself to Human.</small>}
           </div>
           <div className="profile-name-fields"><label className="field"><span>First name</span><input value={draftProfile.firstName} onChange={(event) => setDraftProfile((profile) => ({ ...profile, firstName: event.target.value }))} maxLength={100} /></label><label className="field"><span>Last name</span><input value={draftProfile.lastName} onChange={(event) => setDraftProfile((profile) => ({ ...profile, lastName: event.target.value }))} maxLength={100} /></label></div>
+          <label className="field"><span>Team</span><input value={draftProfile.team} onChange={(event) => setDraftProfile((profile) => ({ ...profile, team: event.target.value }))} maxLength={100} placeholder="e.g. Robotics" /></label>
           <div className="settings-section-heading"><span><Icons.settings /></span><div><strong>AI permissions</strong><small>Only a human profile can change these access rights.</small></div></div>
           <div className="permission-settings">{([['view', 'View'], ['create', 'Create'], ['edit', 'Edit'], ['delete', 'Delete']] as const).map(([key, label]) => <label key={key}><input type="checkbox" checked={draftPermissions[key]} disabled={applicationSettings.profile.type !== "human"} onChange={(event) => setDraftPermissions((permissions) => ({ ...permissions, [key]: event.target.checked }))} /><span>{label}</span></label>)}</div>
           <div className="settings-section-heading"><span><Icons.folder /></span><div><strong>Document storage</strong><small>Choose the folder that will contain Mnemosys-Vault.</small></div>{storage?.configured && <b>Configured</b>}</div>
@@ -604,30 +703,65 @@ function FolderField({ folders, value, onChange }: { folders: Node[]; value: str
   return <label className="field"><span>Location</span><select value={value} onChange={(event) => onChange(event.target.value)}><option value="">Main space</option>{folders.map((folder) => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>;
 }
 
-function Dashboard({ nodes, results, query, space, canCreate, onQuery, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
+function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, profile, aiPermissions, proposals, onManageProfile, onAcceptProposal, onRejectProposal, onStatusChange, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
   nodes: Node[];
-  results: Node[];
+  results: SearchResult[];
   query: string;
+  searchMode: SearchMode;
+  searchLoading: boolean;
+  searchError: string;
   space: Node | null;
   canCreate: boolean;
+  profile: ProfileSettings;
+  aiPermissions: Permissions;
+  proposals: DocumentProposal[];
+  onManageProfile: () => void;
+  onAcceptProposal: (id: string, content?: string) => void;
+  onRejectProposal: (id: string) => void;
+  onStatusChange: (id: string, status: ProposalStatus) => void;
   onQuery: (value: string) => void;
+  onSearchMode: (mode: SearchMode) => void;
   onOpenDocument: (path: string) => void;
   onOpenFolder: (path: string) => void;
   onCreateDocument: () => void;
   onCreateFolder: () => void;
 }) {
   const tx = (english: string, _french: string) => english;
+  const profileName = [profile.firstName, profile.lastName].filter(Boolean).join(" ") || (profile.type === "human" ? "Human profile" : "AI profile");
+  const aiAccess = (["view", "create", "edit", "delete"] as const).filter((permission) => aiPermissions[permission]);
   return <div className="dashboard">
     <div className="dashboard-heading">
       <span className="eyebrow">{tx("KNOWLEDGE BASE", "BASE DE CONNAISSANCES")}</span>
       <h1>{space ? space.name : tx("Hello, what are you looking for?", "Bonjour, que cherchez-vous ?")}</h1>
       <p>{space ? `${documents(space.children ?? []).length} ${tx("document(s) in this space", "document(s) dans cet espace")}` : tx("Browse your team spaces or search the documentation directly.", "Parcourez les espaces de votre équipe ou recherchez directement une documentation.")}</p>
-      <div className="home-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder={tx("Search by title or path…", "Rechercher par titre ou chemin…")} />{query && <button onClick={() => onQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
+      <div className="home-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder={tx("Search titles and Markdown content…", "Rechercher dans les titres et le contenu Markdown…")} />{searchLoading && <i className="saving-spinner" />}{query && <button onClick={() => onQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
+      <div className="search-mode-toggle" aria-label="Search mode"><button className={searchMode === "lexical" ? "active" : ""} onClick={() => onSearchMode("lexical")}><strong>Lexical</strong><span>Exact words and metadata</span></button><button className={searchMode === "hybrid" ? "active" : ""} onClick={() => onSearchMode("hybrid")}><strong>Hybrid</strong><span>Lexical + semantic context</span></button></div>
     </div>
+
+    {!space && !query && <section className="profile-overview" aria-label="Profile and access">
+      <div className="section-title"><h2>Profile and access</h2></div>
+      <div className="profile-overview-grid">
+        <article className="profile-overview-card">
+          <div className="profile-avatar">{profileName.slice(0, 1).toUpperCase()}</div>
+          <div><span className="profile-kind">{profile.type === "human" ? "HUMAN PROFILE" : "AI PROFILE"}</span><h2>{profileName}</h2><p>{profile.team || "No team assigned"}</p></div>
+          <button className="button secondary" onClick={onManageProfile}>Manage profile</button>
+        </article>
+        <article className="profile-overview-card access-card">
+          <div><span className="profile-kind">YOUR ACCESS</span><h2>{profile.type === "human" ? "Full access" : aiAccess.length ? aiAccess.map((permission) => permission[0].toUpperCase() + permission.slice(1)).join(", ") : "No access"}</h2><p>{profile.type === "human" ? "Human profiles can manage AI access." : "Your access is controlled by a human profile."}</p></div>
+          <div className="ai-access-summary"><span>AI access</span><div>{(["view", "create", "edit", "delete"] as const).map((permission) => <b key={permission} className={aiPermissions[permission] ? "enabled" : ""}>{permission}</b>)}</div></div>
+          {profile.type === "human" && <button className="button secondary" onClick={onManageProfile}>Manage AI rights</button>}
+        </article>
+      </div>
+    </section>}
+
+    {!space && !query && proposals.length > 0 && <section className="proposal-inbox" aria-label="AI proposals">
+      <div className="section-title"><h2>AI proposals</h2><span>{proposals.length}</span></div>
+      <div className="proposal-list">{proposals.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} onAccept={onAcceptProposal} onReject={onRejectProposal} onStatusChange={onStatusChange} />)}</div>
+    </section>}
 
     {query ? <section className="search-results">
       <div className="section-title"><h2>{tx("Results", "Résultats")}</h2><span>{results.length}</span></div>
-      {results.length ? <div className="result-list">{results.map((document) => <button key={document.path} onClick={() => onOpenDocument(document.path)}><span className="result-icon"><Icons.file /></span><span><strong>{document.name.replace(/\.md$/, "")}</strong><small>{document.path}</small></span><b>→</b></button>)}</div> : <div className="no-results"><span>⌕</span><strong>{tx("No documents found", "Aucun document trouvé")}</strong><p>{tx("Try another search term.", "Essayez avec un autre terme.")}</p></div>}
+      {searchError ? <div className="no-results"><span>!</span><strong>Search unavailable</strong><p>{searchError}</p></div> : results.length ? <div className="result-list">{results.map((result) => <button key={result.path} onClick={() => result.type === "directory" ? onOpenFolder(result.path) : onOpenDocument(result.path)}><span className="result-icon">{result.type === "directory" ? <Icons.folder /> : <Icons.file />}</span><span><strong>{result.title || result.name.replace(/\.md$/, "")}</strong><small>{result.path}</small>{result.snippet && <p>{result.snippet}</p>}<i>{result.matchTypes.map((matchType) => <em key={matchType} className={matchType}>{matchType}</em>)}</i></span><b>→</b></button>)}</div> : !searchLoading && <div className="no-results"><span>⌕</span><strong>{tx("No pages or folders found", "Aucune page ou dossier trouvé")}</strong><p>{tx("Try another search term or Hybrid mode.", "Essayez un autre terme ou le mode hybride.")}</p></div>}
     </section> : <>
       <div className="section-title"><h2>{space ? tx("Content", "Contenu") : tx("Your documentation", "Vos documentations")}</h2><span>{nodes.length}</span></div>
       {nodes.length ? <div className="space-grid">{nodes.map((node) => {
@@ -640,4 +774,17 @@ function Dashboard({ nodes, results, query, space, canCreate, onQuery, onOpenDoc
       })}</div> : <div className="dashboard-empty"><div className="welcome-icon"><Icons.book /></div><h2>{tx("This space is empty", "Cet espace est vide")}</h2><p>{canCreate ? tx("Create a first page or organize documentation with a folder.", "Créez une première page ou organisez la documentation avec un dossier.") : "This profile has read-only access."}</p>{canCreate && <div><button className="button primary" onClick={onCreateDocument}><Icons.plus />{tx("Create a page", "Créer une page")}</button><button className="button secondary" onClick={onCreateFolder}><Icons.folder />{tx("Create a folder", "Créer un dossier")}</button></div>}</div>}
     </>}
   </div>;
+}
+
+function ProposalCard({ proposal, onAccept, onReject, onStatusChange }: { proposal: DocumentProposal; onAccept: (id: string, content?: string) => void; onReject: (id: string) => void; onStatusChange: (id: string, status: ProposalStatus) => void }) {
+  const [content, setContent] = useState(proposal.proposedContent);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { setContent(proposal.proposedContent); }, [proposal.proposedContent]);
+  const final = proposal.status === "merged" || proposal.status === "rejected";
+  const statusLabel: Record<ProposalStatus, string> = { draft: "Draft", in_review: "In review", needs_human_input: "Needs human input", approved: "Approved", rejected: "Rejected", merged: "Merged" };
+  return <article className="proposal-card">
+    <div className="proposal-card-heading"><div><span className="profile-kind">AI WORK ITEM</span><strong>{proposal.path}</strong><small>{new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(proposal.createdAt))}</small></div><div className="proposal-card-controls"><span className="proposal-status">{statusLabel[proposal.status]}</span>{!final && <button className="icon-button" onClick={() => onReject(proposal.id)} title="Reject proposal" aria-label="Reject proposal"><Icons.x /></button>}</div></div>
+    <pre className="proposal-diff">{proposal.diff}</pre>
+    {!final && <><label className="proposal-status-control">Status<select value={proposal.status} onChange={(event) => onStatusChange(proposal.id, event.target.value as ProposalStatus)}><option value="draft">Draft</option><option value="in_review">In review</option><option value="needs_human_input">Needs human input</option><option value="approved">Approved</option></select></label>{editing && <textarea className="proposal-editor" value={content} onChange={(event) => setContent(event.target.value)} aria-label={`Edit proposal for ${proposal.path}`} />}<div className="proposal-actions"><button className="button secondary" onClick={() => setEditing((open) => !open)}>{editing ? "Hide editor" : "Modify"}</button><button className="button primary" onClick={() => onAccept(proposal.id, editing ? content : undefined)}>Merge proposal</button><button className="button ghost" onClick={() => onReject(proposal.id)}>Reject</button></div></>}
+  </article>;
 }

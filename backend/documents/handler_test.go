@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -30,8 +31,81 @@ func TestHandlerDocumentEndpoints(t *testing.T) {
 	get := httptest.NewRequest(http.MethodGet, "/api/documents/content?path=home.md", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, get)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("# Home")) || !bytes.Contains(response.Body.Bytes(), []byte(`"id":`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"pageType":"technical"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"owner":"Human"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"updatedAt":`)) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("# Home")) || !bytes.Contains(response.Body.Bytes(), []byte(`"id":`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"revision":`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"pageType":"technical"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"owner":"Human"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"updatedAt":`)) {
 		t.Fatalf("get status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestEditConflictDoesNotLeakContentWithoutViewPermission(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "private.md", Type: "document", Content: "initial"}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("private.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := strings.Replace(document.Content, "ai_editable: false", "ai_editable: true", 1)
+	if err := service.Update(UpdateInput{Path: "private.md", Content: &enabled, BaseRevision: document.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := service.Get("private.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "latest secret"
+	if err := service.Update(UpdateInput{Path: "private.md", Content: &secret, BaseRevision: stale.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI}, AIPermissions: Permissions{Edit: true}}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(UpdateInput{Path: "private.md", Content: stringPointer("stale edit"), BaseRevision: stale.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/documents", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || bytes.Contains(response.Body.Bytes(), []byte("currentDocument")) || bytes.Contains(response.Body.Bytes(), []byte("latest secret")) {
+		t.Fatalf("private conflict status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerRequiresRevisionAndReturnsConcurrentVersion(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "shared.md", Type: "document", Content: "initial"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(service)
+
+	missing := httptest.NewRequest(http.MethodPut, "/api/documents", bytes.NewBufferString(`{"path":"shared.md","content":"missing revision"}`))
+	missing.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, missing)
+	if response.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing revision status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	opened, err := service.Get("shared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := "first editor"
+	if err := service.Update(UpdateInput{Path: "shared.md", Content: &first, BaseRevision: opened.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	staleBody, err := json.Marshal(UpdateInput{Path: "shared.md", Content: stringPointer("second editor"), BaseRevision: opened.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := httptest.NewRequest(http.MethodPut, "/api/documents", bytes.NewReader(staleBody))
+	stale.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, stale)
+	if response.Code != http.StatusConflict || !bytes.Contains(response.Body.Bytes(), []byte(`"currentDocument"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`first editor`)) {
+		t.Fatalf("conflict status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -58,6 +132,19 @@ func TestHandlerReturnsDocumentGraph(t *testing.T) {
 	NewHandler(service).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/documents/graph", nil))
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"type":"hierarchy"`)) {
 		t.Fatalf("graph status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerReturnsHybridSearchResults(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "runbook.md", Type: "document", Content: "Deployment runbook and recovery steps."}); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/documents/search?q=deployment&mode=hybrid", nil)
+	NewHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"mode":"hybrid"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"path":"runbook.md"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"lexical"`)) {
+		t.Fatalf("search status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -242,3 +329,70 @@ func TestHandlerEnforcesAIReadOnlyPermissions(t *testing.T) {
 		t.Fatalf("permission update status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
+
+func TestHandlerRoutesAIChangesThroughProposalReview(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "proposal.md", Type: "document", Content: "# Current"}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("proposal.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := strings.Replace(document.Content, "ai_editable: false", "ai_editable: true", 1)
+	if err := service.Update(UpdateInput{Path: "proposal.md", Content: &enabled, BaseRevision: document.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI}, AIPermissions: Permissions{View: true, Edit: true}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(service)
+	document, err = service.Get("proposal.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalBody, err := json.Marshal(UpdateInput{Path: "proposal.md", Content: stringPointer("# Proposed"), BaseRevision: document.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/documents", bytes.NewReader(proposalBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"proposal"`)) {
+		t.Fatalf("proposal update status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var proposals []DocumentProposal
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/documents/proposals", nil))
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &proposals) != nil || len(proposals) != 1 {
+		t.Fatalf("proposal list status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if proposals[0].Status != ProposalInReview {
+		t.Fatalf("proposal status = %q, want %q", proposals[0].Status, ProposalInReview)
+	}
+	status := httptest.NewRequest(http.MethodPatch, "/api/documents/proposals/"+proposals[0].ID, bytes.NewBufferString(`{"status":"approved"}`))
+	status.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, status)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("proposal status update = %d, body = %s", response.Code, response.Body.String())
+	}
+	// Review is a human action, not an agent's self-approval.
+	service.mu.Lock()
+	service.profile = ProfileSettings{Type: ProfileHuman}
+	service.mu.Unlock()
+	accept := httptest.NewRequest(http.MethodPost, "/api/documents/proposals/"+proposals[0].ID+"/accept", bytes.NewBufferString(`{}`))
+	accept.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, accept)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("proposal accept status = %d, body = %s", response.Code, response.Body.String())
+	}
+	document, err = service.Get("proposal.md")
+	if err != nil || !strings.HasSuffix(document.Content, "\n\n# Proposed") {
+		t.Fatalf("accepted document = %#v, %v", document, err)
+	}
+}
+
+func stringPointer(value string) *string { return &value }

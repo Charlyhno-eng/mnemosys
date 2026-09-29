@@ -2,6 +2,7 @@ package documents
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,19 +18,36 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("document not found")
-	ErrAlreadyExists   = errors.New("a document or folder already exists at this path")
-	ErrInvalidPath     = errors.New("invalid document path")
-	ErrInvalidType     = errors.New("type must be either directory or document")
-	ErrInvalidPageType = errors.New("invalid page type")
-	ErrForbidden       = errors.New("operation is not allowed for the active profile")
-	ErrInvalidSettings = errors.New("invalid application settings")
-	ErrInvalidAsset    = errors.New("only PNG, JPEG, GIF and WebP images are accepted")
+	ErrNotFound         = errors.New("document not found")
+	ErrAlreadyExists    = errors.New("a document or folder already exists at this path")
+	ErrInvalidPath      = errors.New("invalid document path")
+	ErrInvalidType      = errors.New("type must be either directory or document")
+	ErrInvalidPageType  = errors.New("invalid page type")
+	ErrForbidden        = errors.New("operation is not allowed for the active profile")
+	ErrInvalidSettings  = errors.New("invalid application settings")
+	ErrInvalidAsset     = errors.New("only PNG, JPEG, GIF and WebP images are accepted")
+	ErrInvalidSearch    = errors.New("invalid search query")
+	ErrRevisionRequired = errors.New("a base revision is required to update document content")
+	ErrEditConflict     = errors.New("document changed since it was opened")
 )
 
 type repository struct {
 	root         string
 	defaultOwner string
+	defaultTeam  string
+}
+
+// EditConflictError includes the current document so a client can resolve a
+// concurrent edit without losing its local draft.
+type EditConflictError struct {
+	Current Document
+}
+
+func (e *EditConflictError) Error() string { return ErrEditConflict.Error() }
+func (e *EditConflictError) Unwrap() error { return ErrEditConflict }
+
+func contentRevision(content []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(content))
 }
 
 var assetExtensions = map[string]string{
@@ -50,7 +68,15 @@ var frontmatterAITouchedPropertyPattern = regexp.MustCompile(`(?m)^ai_touched\s*
 var frontmatterUpdatedAtPattern = regexp.MustCompile(`(?m)^updated_at\s*:\s*["']?([^"'\r\n]+)["']?\s*$`)
 var frontmatterUpdatedAtPropertyPattern = regexp.MustCompile(`(?m)^updated_at\s*:.*$`)
 var frontmatterNamePattern = regexp.MustCompile(`(?m)^name\s*:\s*(.*)$`)
-var frontmatterDescriptionPattern = regexp.MustCompile(`(?m)^description\s*:\s*(.*)$`)
+var frontmatterTeamPattern = regexp.MustCompile(`(?m)^team\s*:\s*(.*)$`)
+var frontmatterTeamPropertyPattern = regexp.MustCompile(`(?m)^team\s*:.*$`)
+var frontmatterFolderPathPattern = regexp.MustCompile(`(?m)^folder_path\s*:\s*(.*)$`)
+var frontmatterFolderPathPropertyPattern = regexp.MustCompile(`(?m)^folder_path\s*:.*$`)
+var frontmatterApplicationPattern = regexp.MustCompile(`(?m)^application\s*:\s*(.*)$`)
+var frontmatterApplicationPropertyPattern = regexp.MustCompile(`(?m)^application\s*:.*$`)
+var frontmatterAIEditablePattern = regexp.MustCompile(`(?m)^ai_editable\s*:\s*(true|false)\s*$`)
+var frontmatterAIEditablePropertyPattern = regexp.MustCompile(`(?m)^ai_editable\s*:.*$`)
+var frontmatterDescriptionPropertyPattern = regexp.MustCompile(`(?m)^description\s*:.*(?:\n|$)`)
 
 func frontmatterValue(content string, pattern *regexp.Regexp) string {
 	if !strings.HasPrefix(content, "---\n") {
@@ -121,6 +147,10 @@ func aiTouchedFromContent(content string) bool {
 	return frontmatterValue(content, frontmatterAITouchedPattern) == "true"
 }
 
+func aiEditableFromContent(content string) bool {
+	return frontmatterValue(content, frontmatterAIEditablePattern) == "true"
+}
+
 func updatedAtFromContent(content string, fallback time.Time) time.Time {
 	if value := frontmatterValue(content, frontmatterUpdatedAtPattern); value != "" {
 		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
@@ -142,7 +172,7 @@ func newDocumentID() (string, error) {
 }
 
 // newRepository creates filesystem access rooted at one validated directory.
-func newRepository(root, defaultOwner string) (*repository, error) {
+func newRepository(root, defaultOwner, defaultTeam string) (*repository, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("stat documents root: %w", err)
@@ -150,7 +180,7 @@ func newRepository(root, defaultOwner string) (*repository, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("documents root is not a directory")
 	}
-	repository := &repository{root: root, defaultOwner: defaultOwner}
+	repository := &repository{root: root, defaultOwner: defaultOwner, defaultTeam: defaultTeam}
 	if err := repository.ensureDocumentIDs(); err != nil {
 		return nil, err
 	}
@@ -198,7 +228,7 @@ func (r *repository) ensureDocumentIDs() error {
 		}
 		rawOwner := frontmatterValue(string(content), frontmatterOwnerPattern)
 		owner := ownerFromContent(string(content), r.defaultOwner)
-		metadataComplete := owner != "" && owner != "human" && owner != "ai" && frontmatterModifiedByPattern.MatchString(string(content)) && frontmatterAITouchedPattern.MatchString(string(content)) && frontmatterUpdatedAtPattern.MatchString(string(content))
+		metadataComplete := owner != "" && owner != "human" && owner != "ai" && frontmatterModifiedByPattern.MatchString(string(content)) && frontmatterAITouchedPattern.MatchString(string(content)) && frontmatterUpdatedAtPattern.MatchString(string(content)) && frontmatterTeamPropertyPattern.MatchString(string(content)) && frontmatterFolderPathPropertyPattern.MatchString(string(content)) && frontmatterApplicationPropertyPattern.MatchString(string(content)) && frontmatterAIEditablePattern.MatchString(string(content)) && !frontmatterDescriptionPropertyPattern.MatchString(string(content))
 		if documentID != "" && !duplicate && metadataComplete {
 			seen[documentID] = struct{}{}
 			return nil
@@ -215,7 +245,7 @@ func (r *repository) ensureDocumentIDs() error {
 		if rawOwner == "ai" {
 			actor, forceAITouched = ProfileAI, true
 		}
-		updated := ensureDocumentMetadata(filepath.ToSlash(relative), string(content), "", owner, actor, forceAITouched, documentID, info.ModTime().UTC())
+		updated := ensureDocumentMetadata(filepath.ToSlash(relative), string(content), "", owner, r.defaultTeam, actor, forceAITouched, documentID, info.ModTime().UTC())
 		if err := os.WriteFile(path, []byte(updated), info.Mode().Perm()); err != nil {
 			return fmt.Errorf("write document metadata: %w", err)
 		}
@@ -341,14 +371,19 @@ func (r *repository) graph() (Graph, error) {
 			return Graph{}, err
 		}
 		for _, match := range wikiLinkPattern.FindAllStringSubmatch(document.Content, -1) {
-			target := strings.TrimSpace(strings.SplitN(match[1], "|", 2)[0])
-			target = strings.TrimSpace(strings.SplitN(target, "#", 2)[0])
+			target := parseWikiLink(match[1])
 			if resolved := resolveGraphTarget(target, byPath, aliases); resolved != "" && resolved != path {
 				appendGraphEdge(&graph.Edges, edges, path, resolved, "link")
 			}
 		}
 	}
 	return graph, nil
+}
+
+// parseWikiLink extracts the target from a regular wiki link ([[target|label]]).
+func parseWikiLink(raw string) string {
+	target := strings.TrimSpace(strings.SplitN(raw, "|", 2)[0])
+	return strings.TrimSpace(strings.SplitN(target, "#", 2)[0])
 }
 
 // resolveGraphTarget resolves full paths first and unique names second.
@@ -409,7 +444,7 @@ func (r *repository) readDirectory(absolute, relative string) ([]Node, error) {
 				return nil, fmt.Errorf("inspect document metadata: %w", err)
 			}
 			text := string(content)
-			nodes = append(nodes, Node{Name: entry.Name(), Path: path, Type: "document", Title: frontmatterValue(text, frontmatterNamePattern), Description: frontmatterValue(text, frontmatterDescriptionPattern), PageType: pageTypeFromContent(text), Owner: ownerFromContent(text, r.defaultOwner), ModifiedBy: modifiedByFromContent(text), AITouched: aiTouchedFromContent(text), UpdatedAt: updatedAtFromContent(text, info.ModTime())})
+			nodes = append(nodes, Node{Name: entry.Name(), Path: path, Type: "document", Title: frontmatterValue(text, frontmatterNamePattern), PageType: pageTypeFromContent(text), Owner: ownerFromContent(text, r.defaultOwner), Application: frontmatterValue(text, frontmatterApplicationPattern), AIEditable: aiEditableFromContent(text), ModifiedBy: modifiedByFromContent(text), AITouched: aiTouchedFromContent(text), UpdatedAt: updatedAtFromContent(text, info.ModTime())})
 		}
 	}
 	sort.Slice(nodes, func(i, j int) bool {
@@ -443,7 +478,7 @@ func (r *repository) get(path string) (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("read document: %w", err)
 	}
-	return Document{ID: documentIDFromContent(string(content)), Path: path, Content: string(content), PageType: pageTypeFromContent(string(content)), Owner: ownerFromContent(string(content), r.defaultOwner), ModifiedBy: modifiedByFromContent(string(content)), AITouched: aiTouchedFromContent(string(content)), UpdatedAt: updatedAtFromContent(string(content), info.ModTime())}, nil
+	return Document{ID: documentIDFromContent(string(content)), Path: path, Content: string(content), Revision: contentRevision(content), PageType: pageTypeFromContent(string(content)), Owner: ownerFromContent(string(content), r.defaultOwner), Application: frontmatterValue(string(content), frontmatterApplicationPattern), AIEditable: aiEditableFromContent(string(content)), ModifiedBy: modifiedByFromContent(string(content)), AITouched: aiTouchedFromContent(string(content)), UpdatedAt: updatedAtFromContent(string(content), info.ModTime())}, nil
 }
 
 // create adds one document or directory without overwriting existing data.
@@ -473,7 +508,7 @@ func (r *repository) create(input CreateInput) error {
 	if err != nil {
 		return err
 	}
-	input.Content = ensureDocumentMetadata(input.Path, input.Content, input.PageType, input.Owner, input.ModifiedBy, false, documentID, time.Now().UTC())
+	input.Content = ensureDocumentMetadata(input.Path, input.Content, input.PageType, input.Owner, r.defaultTeam, input.ModifiedBy, false, documentID, time.Now().UTC())
 	if err := os.WriteFile(target, []byte(input.Content), 0o644); err != nil {
 		return fmt.Errorf("create document: %w", err)
 	}
@@ -503,7 +538,7 @@ func (r *repository) write(path, content string, actor ProfileType) error {
 			return err
 		}
 	}
-	content = ensureDocumentMetadata(path, content, "", ownerFromContent(string(existing), r.defaultOwner), actor, aiTouchedFromContent(string(existing)), documentID, time.Now().UTC())
+	content = ensureDocumentMetadata(path, content, "", ownerFromContent(string(existing), r.defaultOwner), r.defaultTeam, actor, aiTouchedFromContent(string(existing)), documentID, time.Now().UTC())
 	if err := os.WriteFile(r.absolute(path), []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write document: %w", err)
 	}
@@ -512,11 +547,11 @@ func (r *repository) write(path, content string, actor ProfileType) error {
 
 // ensureDocumentProperties adds all required frontmatter fields for legacy callers.
 func ensureDocumentProperties(path, content string, requestedPageType PageType, documentID string) string {
-	return ensureDocumentMetadata(path, content, requestedPageType, "Human", ProfileHuman, false, documentID, time.Now().UTC())
+	return ensureDocumentMetadata(path, content, requestedPageType, "Human", "", ProfileHuman, false, documentID, time.Now().UTC())
 }
 
 // ensureDocumentMetadata keeps all AI-relevant metadata inside the Markdown file.
-func ensureDocumentMetadata(path, content string, requestedPageType PageType, requestedOwner string, actor ProfileType, forceAITouched bool, documentID string, updatedAt time.Time) string {
+func ensureDocumentMetadata(path, content string, requestedPageType PageType, requestedOwner, requestedTeam string, actor ProfileType, forceAITouched bool, documentID string, updatedAt time.Time) string {
 	name := strings.TrimSuffix(filepath.Base(path), ".md")
 	pageType := requestedPageType
 	if pageType == "" {
@@ -526,12 +561,22 @@ func ensureDocumentMetadata(path, content string, requestedPageType PageType, re
 	if owner == "" {
 		owner = "Human"
 	}
+	team := requestedTeam
+	if team == "" {
+		team = frontmatterValue(content, frontmatterTeamPattern)
+	}
 	if actor != ProfileAI {
 		actor = ProfileHuman
 	}
 	aiTouched := forceAITouched || aiTouchedFromContent(content) || actor == ProfileAI
 	updated := updatedAt.UTC().Format(time.RFC3339)
-	header := "---\nid: " + strconv.Quote(documentID) + "\nname: " + strconv.Quote(name) + "\ndescription: \"\"\npage_type: " + strconv.Quote(string(pageType)) + "\nowner: " + strconv.Quote(owner) + "\nlast_modified_by: " + strconv.Quote(string(actor)) + "\nai_touched: " + strconv.FormatBool(aiTouched) + "\nupdated_at: " + strconv.Quote(updated) + "\n---\n\n"
+	folderPath := "~/" + filepath.ToSlash(filepath.Dir(path))
+	if filepath.ToSlash(filepath.Dir(path)) == "." {
+		folderPath = "~"
+	}
+	application := frontmatterValue(content, frontmatterApplicationPattern)
+	aiEditable := aiEditableFromContent(content)
+	header := "---\nid: " + strconv.Quote(documentID) + "\nname: " + strconv.Quote(name) + "\npage_type: " + strconv.Quote(string(pageType)) + "\nowner: " + strconv.Quote(owner) + "\nteam: " + strconv.Quote(team) + "\napplication: " + strconv.Quote(application) + "\nfolder_path: " + strconv.Quote(folderPath) + "\nai_editable: " + strconv.FormatBool(aiEditable) + "\nlast_modified_by: " + strconv.Quote(string(actor)) + "\nai_touched: " + strconv.FormatBool(aiTouched) + "\nupdated_at: " + strconv.Quote(updated) + "\n---\n\n"
 	if !strings.HasPrefix(content, "---\n") {
 		return header + content
 	}
@@ -553,6 +598,26 @@ func ensureDocumentMetadata(path, content string, requestedPageType PageType, re
 	}
 	if frontmatterOwnerPropertyPattern.MatchString(frontmatter) {
 		frontmatter = frontmatterOwnerPropertyPattern.ReplaceAllString(frontmatter, "owner: "+strconv.Quote(owner))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterTeamPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterTeamPropertyPattern.ReplaceAllString(frontmatter, "team: "+strconv.Quote(team))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterFolderPathPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterFolderPathPropertyPattern.ReplaceAllString(frontmatter, "folder_path: "+strconv.Quote(folderPath))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterApplicationPropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterApplicationPropertyPattern.ReplaceAllString(frontmatter, "application: "+strconv.Quote(application))
+		content = content[:4] + frontmatter + content[closing:]
+		closing = 4 + len(frontmatter)
+	}
+	if frontmatterAIEditablePropertyPattern.MatchString(frontmatter) {
+		frontmatter = frontmatterAIEditablePropertyPattern.ReplaceAllString(frontmatter, "ai_editable: "+strconv.FormatBool(aiEditable))
 		content = content[:4] + frontmatter + content[closing:]
 		closing = 4 + len(frontmatter)
 	}
@@ -578,8 +643,20 @@ func ensureDocumentMetadata(path, content string, requestedPageType PageType, re
 	if !regexp.MustCompile(`(?m)^name\s*:`).MatchString(frontmatter) {
 		missing += "name: " + strconv.Quote(name) + "\n"
 	}
-	if !regexp.MustCompile(`(?m)^description\s*:`).MatchString(frontmatter) {
-		missing += "description: \"\"\n"
+	frontmatter = frontmatterDescriptionPropertyPattern.ReplaceAllString(frontmatter, "")
+	content = content[:4] + frontmatter + content[closing:]
+	closing = 4 + len(frontmatter)
+	if !frontmatterTeamPropertyPattern.MatchString(frontmatter) {
+		missing += "team: " + strconv.Quote(team) + "\n"
+	}
+	if !frontmatterFolderPathPropertyPattern.MatchString(frontmatter) {
+		missing += "folder_path: " + strconv.Quote(folderPath) + "\n"
+	}
+	if !frontmatterApplicationPropertyPattern.MatchString(frontmatter) {
+		missing += "application: " + strconv.Quote(application) + "\n"
+	}
+	if !frontmatterAIEditablePropertyPattern.MatchString(frontmatter) {
+		missing += "ai_editable: " + strconv.FormatBool(aiEditable) + "\n"
 	}
 	if !frontmatterPageTypePropertyPattern.MatchString(frontmatter) {
 		missing += "page_type: " + strconv.Quote(string(pageType)) + "\n"

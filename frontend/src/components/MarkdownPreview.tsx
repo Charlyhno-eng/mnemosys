@@ -62,7 +62,8 @@ function inlineFormattingNodes(value: string): HastNode[] {
       nodes.push({ type: "element", tagName: "u", properties: {}, children: [{ type: "text", value: match[1] }] });
     } else {
       const [rawTarget, rawLabel] = match[2].split("|", 2);
-      const target = rawTarget.trim();
+      const rawTargetValue = rawTarget.trim();
+      const target = rawTargetValue;
       const parts = target.split("/");
       const label = rawLabel?.trim() || parts[parts.length - 1]?.replace(/\.md$/, "") || target;
       nodes.push({ type: "element", tagName: "a", properties: { href: `#wiki=${encodeURIComponent(target)}`, className: ["wiki-link"] }, children: [{ type: "text", value: label }] });
@@ -74,9 +75,9 @@ function inlineFormattingNodes(value: string): HastNode[] {
 }
 
 function withoutFrontmatter(content: string) {
-  if (!content.startsWith("---\n")) return content;
-  const closing = content.indexOf("\n---", 4);
-  return closing < 0 ? content : content.slice(closing + 4).replace(/^\s+/, "");
+  const normalized = content.replace(/^\uFEFF/, "");
+  const frontmatter = normalized.match(/^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/);
+  return frontmatter ? normalized.slice(frontmatter[0].length).replace(/^\s+/, "") : normalized;
 }
 
 export function MarkdownPreview({ content, onOpenWikiLink }: { content: string; onOpenWikiLink?: (target: string) => void }) {

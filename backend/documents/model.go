@@ -36,6 +36,7 @@ type ProfileSettings struct {
 	Type      ProfileType `json:"type"`
 	FirstName string      `json:"firstName"`
 	LastName  string      `json:"lastName"`
+	Team      string      `json:"team"`
 }
 
 type Permissions struct {
@@ -55,20 +56,25 @@ type Node struct {
 	Description string      `json:"description,omitempty"`
 	PageType    PageType    `json:"pageType,omitempty"`
 	Owner       string      `json:"owner,omitempty"`
+	Application string      `json:"application,omitempty"`
+	AIEditable  bool        `json:"aiEditable"`
 	ModifiedBy  ProfileType `json:"lastModifiedBy,omitempty"`
 	AITouched   bool        `json:"aiTouched,omitempty"`
 	UpdatedAt   time.Time   `json:"updatedAt,omitempty"`
 }
 
 type Document struct {
-	ID         string      `json:"id"`
-	Path       string      `json:"path"`
-	Content    string      `json:"content"`
-	PageType   PageType    `json:"pageType"`
-	Owner      string      `json:"owner"`
-	ModifiedBy ProfileType `json:"lastModifiedBy"`
-	AITouched  bool        `json:"aiTouched"`
-	UpdatedAt  time.Time   `json:"updatedAt"`
+	ID          string      `json:"id"`
+	Path        string      `json:"path"`
+	Content     string      `json:"content"`
+	Revision    string      `json:"revision"`
+	PageType    PageType    `json:"pageType"`
+	Owner       string      `json:"owner"`
+	Application string      `json:"application"`
+	AIEditable  bool        `json:"aiEditable"`
+	ModifiedBy  ProfileType `json:"lastModifiedBy"`
+	AITouched   bool        `json:"aiTouched"`
+	UpdatedAt   time.Time   `json:"updatedAt"`
 }
 
 type CreateInput struct {
@@ -81,9 +87,46 @@ type CreateInput struct {
 }
 
 type UpdateInput struct {
-	Path    string  `json:"path"`
-	NewPath *string `json:"newPath"`
+	Path         string  `json:"path"`
+	NewPath      *string `json:"newPath"`
+	Content      *string `json:"content"`
+	BaseRevision string  `json:"baseRevision,omitempty"`
+}
+
+// DocumentProposal is an AI-generated document change with a collaboration status.
+type DocumentProposal struct {
+	ID              string         `json:"id"`
+	Path            string         `json:"path"`
+	OriginalContent string         `json:"originalContent"`
+	ProposedContent string         `json:"proposedContent"`
+	Diff            string         `json:"diff"`
+	Status          ProposalStatus `json:"status"`
+	CreatedAt       time.Time      `json:"createdAt"`
+}
+
+type ProposalStatus string
+
+const (
+	ProposalDraft           ProposalStatus = "draft"
+	ProposalInReview        ProposalStatus = "in_review"
+	ProposalNeedsHumanInput ProposalStatus = "needs_human_input"
+	ProposalApproved        ProposalStatus = "approved"
+	ProposalRejected        ProposalStatus = "rejected"
+	ProposalMerged          ProposalStatus = "merged"
+)
+
+type ProposalStatusInput struct {
+	Status ProposalStatus `json:"status"`
+}
+
+type ProposalDecision struct {
 	Content *string `json:"content"`
+}
+
+type UpdateResult struct {
+	Path     string            `json:"path"`
+	Proposal *DocumentProposal `json:"proposal,omitempty"`
+	Document *Document         `json:"document,omitempty"`
 }
 
 type Asset struct {
@@ -137,4 +180,29 @@ type GraphEdge struct {
 type Graph struct {
 	Nodes []GraphNode `json:"nodes"`
 	Edges []GraphEdge `json:"edges"`
+}
+
+type SearchMode string
+
+const (
+	SearchLexical SearchMode = "lexical"
+	SearchHybrid  SearchMode = "hybrid"
+)
+
+// SearchResult describes why and where one page or folder matched a search query.
+type SearchResult struct {
+	Path       string   `json:"path"`
+	Type       string   `json:"type"`
+	Name       string   `json:"name"`
+	Title      string   `json:"title"`
+	PageType   PageType `json:"pageType"`
+	Snippet    string   `json:"snippet"`
+	Score      float64  `json:"score"`
+	MatchTypes []string `json:"matchTypes"`
+}
+
+type SearchResponse struct {
+	Query   string         `json:"query"`
+	Mode    SearchMode     `json:"mode"`
+	Results []SearchResult `json:"results"`
 }

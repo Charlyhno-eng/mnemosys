@@ -29,10 +29,11 @@ func defaultAIPermissions() Permissions {
 func validateProfile(profile ProfileSettings) (ProfileSettings, error) {
 	profile.FirstName = strings.TrimSpace(profile.FirstName)
 	profile.LastName = strings.TrimSpace(profile.LastName)
+	profile.Team = strings.TrimSpace(profile.Team)
 	if profile.Type != ProfileHuman && profile.Type != ProfileAI {
 		return ProfileSettings{}, fmt.Errorf("%w: profile type must be human or ai", ErrInvalidSettings)
 	}
-	if len(profile.FirstName) > 100 || len(profile.LastName) > 100 || strings.ContainsAny(profile.FirstName+profile.LastName, "\r\n") {
+	if len(profile.FirstName) > 100 || len(profile.LastName) > 100 || len(profile.Team) > 100 || strings.ContainsAny(profile.FirstName+profile.LastName+profile.Team, "\r\n") {
 		return ProfileSettings{}, fmt.Errorf("%w: invalid profile name", ErrInvalidSettings)
 	}
 	return profile, nil
@@ -67,7 +68,7 @@ func parseApplicationConfig(data []byte) (applicationConfig, error) {
 			}
 		case "profile":
 			switch key {
-			case "type", "first_name", "last_name":
+			case "type", "first_name", "last_name", "team":
 				value, err := strconv.Unquote(strings.TrimSpace(rawValue))
 				if err != nil {
 					return applicationConfig{}, fmt.Errorf("line %d: profile value must be a quoted string", lineNumber)
@@ -79,6 +80,8 @@ func parseApplicationConfig(data []byte) (applicationConfig, error) {
 					config.Profile.FirstName = value
 				case "last_name":
 					config.Profile.LastName = value
+				case "team":
+					config.Profile.Team = value
 				}
 			}
 		case "ai_permissions":
@@ -136,6 +139,8 @@ func persistApplicationConfig(path string, config applicationConfig) error {
 	contents.WriteString(strconv.Quote(profile.FirstName))
 	contents.WriteString("\nlast_name = ")
 	contents.WriteString(strconv.Quote(profile.LastName))
+	contents.WriteString("\nteam = ")
+	contents.WriteString(strconv.Quote(profile.Team))
 	contents.WriteString("\n\n[ai_permissions]\nview = ")
 	contents.WriteString(strconv.FormatBool(config.AIPermissions.View))
 	contents.WriteString("\ncreate = ")

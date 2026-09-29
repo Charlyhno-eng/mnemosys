@@ -34,7 +34,7 @@ func TestDocumentLifecycle(t *testing.T) {
 	}
 	content := "# Updated"
 	newPath := "engineering/onboarding.md"
-	if err := service.Update(UpdateInput{Path: "engineering/guide.md", NewPath: &newPath, Content: &content}); err != nil {
+	if err := service.Update(UpdateInput{Path: "engineering/guide.md", NewPath: &newPath, Content: &content, BaseRevision: document.Revision}); err != nil {
 		t.Fatalf("update document: %v", err)
 	}
 	document, err = service.Get(newPath)
@@ -58,17 +58,66 @@ func TestDocumentsReceiveDefaultProperties(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.ID == "" || !frontmatterIDPattern.MatchString(document.Content) || !strings.Contains(document.Content, `name: "Product Guide"`) || !strings.Contains(document.Content, `description: ""`) || !strings.Contains(document.Content, `page_type: "general"`) || !strings.HasSuffix(document.Content, "# Guide") {
+	if document.ID == "" || document.AIEditable || document.Application != "" || !frontmatterIDPattern.MatchString(document.Content) || !strings.Contains(document.Content, `name: "Product Guide"`) || !strings.Contains(document.Content, `folder_path: "~"`) || !strings.Contains(document.Content, `ai_editable: false`) || strings.Contains(document.Content, "description:") || !strings.Contains(document.Content, `page_type: "general"`) || !strings.HasSuffix(document.Content, "# Guide") {
 		t.Fatalf("document = %#v", document)
 	}
 
 	content := "---\nname: \"Custom\"\n---\n\nText"
-	if err := service.Update(UpdateInput{Path: "Product Guide.md", Content: &content}); err != nil {
+	if err := service.Update(UpdateInput{Path: "Product Guide.md", Content: &content, BaseRevision: document.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	document, err = service.Get("Product Guide.md")
-	if err != nil || !strings.Contains(document.Content, "description: \"\"") || strings.Count(document.Content, "name:") != 1 {
+	if err != nil || strings.Contains(document.Content, "description:") || strings.Count(document.Content, "name:") != 1 {
 		t.Fatalf("updated properties = %q, %v", document.Content, err)
+	}
+}
+
+func TestAIEditingRequiresPerDocumentOptIn(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "locked.md", Type: "document", Content: "# Locked"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI}, AIPermissions: Permissions{View: true, Edit: true}}); err != nil {
+		t.Fatal(err)
+	}
+	content := "# AI attempt"
+	document, err := service.Get("locked.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Update(UpdateInput{Path: "locked.md", Content: &content, BaseRevision: document.Revision}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("locked document update error = %v, want forbidden", err)
+	}
+}
+
+func TestProfileTeamAndFolderPathAreStoredInFrontmatter(t *testing.T) {
+	service, _ := newTestService(t)
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileHuman, FirstName: "Ada", LastName: "Lovelace", Team: "Robotics"}, AIPermissions: defaultAIPermissions()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "robot", Type: "directory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "robot/drone", Type: "directory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "robot/drone/flight.md", Type: "document", Content: "# Flight"}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("robot/drone/flight.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(document.Content, `owner: "Ada Lovelace"`) || !strings.Contains(document.Content, `team: "Robotics"`) || !strings.Contains(document.Content, `folder_path: "~/robot/drone"`) {
+		t.Fatalf("document metadata = %q", document.Content)
+	}
+	updated := strings.Replace(strings.Replace(document.Content, `application: ""`, `application: "Flight Control"`, 1), `ai_editable: false`, `ai_editable: true`, 1)
+	if err := service.Update(UpdateInput{Path: "robot/drone/flight.md", Content: &updated, BaseRevision: document.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	document, err = service.Get("robot/drone/flight.md")
+	if err != nil || document.Application != "Flight Control" || !document.AIEditable {
+		t.Fatalf("application metadata = %#v, %v", document, err)
 	}
 }
 
@@ -98,7 +147,7 @@ func TestExistingDocumentsReceiveSearchableMetadataAtStartup(t *testing.T) {
 	if err != nil || len(tree) != 1 {
 		t.Fatalf("tree = %#v, %v", tree, err)
 	}
-	if tree[0].Title != "Legacy guide" || tree[0].Description != "Migration handbook" || tree[0].PageType != "business" || tree[0].Owner != "Human" || !tree[0].UpdatedAt.Equal(modified) {
+	if tree[0].Title != "Legacy guide" || tree[0].Description != "" || tree[0].PageType != "business" || tree[0].Owner != "Human" || !strings.Contains(document.Content, `folder_path: "~"`) || strings.Contains(document.Content, "description:") || !tree[0].UpdatedAt.Equal(modified) {
 		t.Fatalf("search metadata = %#v", tree[0])
 	}
 }
@@ -113,7 +162,7 @@ func TestDocumentIDIsImmutableAcrossWritesAndMoves(t *testing.T) {
 		t.Fatalf("created document = %#v, %v", created, err)
 	}
 	content := "---\nid: \"00000000-0000-4000-8000-000000000000\"\n---\n\n# Changed"
-	if err := service.Update(UpdateInput{Path: "before.md", Content: &content}); err != nil {
+	if err := service.Update(UpdateInput{Path: "before.md", Content: &content, BaseRevision: created.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	destination := "after.md"
@@ -198,8 +247,12 @@ func TestDocumentPageTypeAndUpdatedAt(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(root, "system.md"), past, past); err != nil {
 		t.Fatal(err)
 	}
+	humanService, err := NewService(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	updatedContent := document.Content + "\nChanged"
-	if err := service.Update(UpdateInput{Path: "system.md", Content: &updatedContent}); err != nil {
+	if err := humanService.Update(UpdateInput{Path: "system.md", Content: &updatedContent, BaseRevision: document.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	document, err = service.Get("system.md")
@@ -237,7 +290,7 @@ func TestUpdateRefreshesFrontmatterTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated := document.Content + "\nChanged"
-	if err := service.Update(UpdateInput{Path: "dated.md", Content: &updated}); err != nil {
+	if err := service.Update(UpdateInput{Path: "dated.md", Content: &updated, BaseRevision: document.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	document, err = service.Get("dated.md")
@@ -256,7 +309,7 @@ func TestCreatePageTypeOverridesContentAndKeepsRequiredProperties(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.PageType != "technical" || !strings.Contains(document.Content, `page_type: "technical"`) || !strings.Contains(document.Content, `name: "system"`) || !strings.Contains(document.Content, `description: ""`) {
+	if document.PageType != "technical" || !strings.Contains(document.Content, `page_type: "technical"`) || !strings.Contains(document.Content, `name: "system"`) || strings.Contains(document.Content, "description:") {
 		t.Fatalf("document = %#v", document)
 	}
 }
@@ -296,6 +349,38 @@ func TestGraphContainsHierarchyAndWikiLinks(t *testing.T) {
 	for edge, found := range wanted {
 		if !found {
 			t.Errorf("missing edge %q in %#v", edge, graph.Edges)
+		}
+	}
+}
+
+func TestGraphTreatsWikiLinksAsOrdinaryReferences(t *testing.T) {
+	service, _ := newTestService(t)
+	for _, input := range []CreateInput{
+		{Path: "architecture.md", Type: "document"},
+		{Path: "legacy.md", Type: "document"},
+		{Path: "service.md", Type: "document", Content: "[[architecture]] [[legacy|Old service]]"},
+	} {
+		if err := service.Create(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	graph, err := service.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted := map[string]bool{
+		"link\x00service.md\x00architecture.md": false,
+		"link\x00service.md\x00legacy.md":       false,
+	}
+	for _, edge := range graph.Edges {
+		key := edge.Type + "\x00" + edge.Source + "\x00" + edge.Target
+		if _, ok := wanted[key]; ok {
+			wanted[key] = true
+		}
+	}
+	for edge, found := range wanted {
+		if !found {
+			t.Errorf("missing typed edge %q in %#v", edge, graph.Edges)
 		}
 	}
 }
@@ -346,6 +431,61 @@ func TestGraphResolvesStableIDLinksAfterRename(t *testing.T) {
 		}
 	}
 	t.Fatalf("stable ID link not resolved after rename: %#v", graph.Edges)
+}
+
+func TestSearchKeepsLexicalResultsAndAddsSemanticMatches(t *testing.T) {
+	service, _ := newTestService(t)
+	for _, input := range []CreateInput{
+		{Path: "deployment.md", Type: "document", Content: "Deployment automation uses a release pipeline."},
+		{Path: "release.md", Type: "document", Content: "The release pipeline promotes builds to production."},
+		{Path: "unrelated.md", Type: "document", Content: "Customer contact directory."},
+	} {
+		if err := service.Create(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lexical, err := service.Search("deployment", SearchLexical, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lexical.Results) != 1 || lexical.Results[0].Path != "deployment.md" || len(lexical.Results[0].MatchTypes) != 1 || lexical.Results[0].MatchTypes[0] != "lexical" {
+		t.Fatalf("lexical results = %#v", lexical.Results)
+	}
+	hybrid, err := service.Search("deployment", SearchHybrid, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSemantic := false
+	for _, result := range hybrid.Results {
+		if result.Path == "release.md" && len(result.MatchTypes) == 1 && result.MatchTypes[0] == "semantic" {
+			foundSemantic = true
+		}
+		if result.Path == "unrelated.md" {
+			t.Fatalf("unrelated semantic result = %#v", result)
+		}
+	}
+	if !foundSemantic {
+		t.Fatalf("hybrid results do not contain semantic relation: %#v", hybrid.Results)
+	}
+}
+
+func TestSearchValidatesModeQueryAndScope(t *testing.T) {
+	service, _ := newTestService(t)
+	if _, err := service.Search("query", "unknown", ""); !errors.Is(err, ErrInvalidSearch) {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+	if _, err := service.Search(strings.Repeat("x", 201), SearchLexical, ""); !errors.Is(err, ErrInvalidSearch) {
+		t.Fatalf("long query error = %v", err)
+	}
+	if _, err := service.Search("query", SearchLexical, "../outside"); !errors.Is(err, ErrInvalidSearch) {
+		t.Fatalf("invalid scope error = %v", err)
+	}
+	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileAI}, AIPermissions: Permissions{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Search("query", SearchLexical, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("search without view permission error = %v", err)
+	}
 }
 
 func TestRejectsUnsafePaths(t *testing.T) {
@@ -414,12 +554,16 @@ func TestConcurrentWritesRemainWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := []string{"first", "second", "third", "fourth"}
+	opened, err := service.Get("note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var group sync.WaitGroup
 	for _, value := range values {
 		group.Add(1)
 		go func(value string) {
 			defer group.Done()
-			if err := service.Update(UpdateInput{Path: "note.md", Content: &value}); err != nil {
+			if err := service.Update(UpdateInput{Path: "note.md", Content: &value, BaseRevision: opened.Revision}); err != nil && !errors.Is(err, ErrEditConflict) {
 				t.Errorf("update: %v", err)
 			}
 		}(value)
@@ -435,6 +579,70 @@ func TestConcurrentWritesRemainWhole(t *testing.T) {
 		}
 	}
 	t.Errorf("content %q is not one complete concurrent write", document.Content)
+}
+
+func TestConcurrentRevisionWritesRejectStaleEditors(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "shared.md", Type: "document", Content: "initial"}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Get("shared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := []string{"editor one", "editor two", "editor three", "editor four"}
+	var group sync.WaitGroup
+	var resultMu sync.Mutex
+	succeeded, conflicted := 0, 0
+	for _, value := range values {
+		group.Add(1)
+		go func(value string) {
+			defer group.Done()
+			err := service.Update(UpdateInput{Path: "shared.md", Content: &value, BaseRevision: document.Revision})
+			resultMu.Lock()
+			defer resultMu.Unlock()
+			switch {
+			case err == nil:
+				succeeded++
+			case errors.Is(err, ErrEditConflict):
+				conflicted++
+			default:
+				t.Errorf("update error = %v", err)
+			}
+		}(value)
+	}
+	group.Wait()
+	if succeeded != 1 || conflicted != len(values)-1 {
+		t.Fatalf("successful writes = %d, conflicts = %d", succeeded, conflicted)
+	}
+	current, err := service.Get("shared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision == document.Revision {
+		t.Fatal("revision did not change after the accepted write")
+	}
+}
+
+func TestEditConflictReturnsCurrentDocument(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "shared.md", Type: "document", Content: "initial"}); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := service.Get("shared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := "first save"
+	if err := service.Update(UpdateInput{Path: "shared.md", Content: &first, BaseRevision: opened.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	stale := "stale save"
+	err = service.Update(UpdateInput{Path: "shared.md", Content: &stale, BaseRevision: opened.Revision})
+	var conflict *EditConflictError
+	if !errors.As(err, &conflict) || !strings.HasSuffix(conflict.Current.Content, "\n\nfirst save") {
+		t.Fatalf("conflict = %#v, error = %v", conflict, err)
+	}
 }
 
 func TestConfigurableStoragePersistsAndReloads(t *testing.T) {
@@ -531,12 +739,20 @@ func TestApplicationSettingsRequireAProfile(t *testing.T) {
 	}
 }
 
-func TestAIMarksEditedHumanPages(t *testing.T) {
+func TestAIChangesBecomeReviewableProposals(t *testing.T) {
 	service, _ := newTestService(t)
 	if _, err := service.ConfigureApplication(ApplicationSettingsInput{Profile: ProfileSettings{Type: ProfileHuman, FirstName: "Grace", LastName: "Hopper"}, AIPermissions: defaultAIPermissions()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Create(CreateInput{Path: "human.md", Type: "document", Content: "Human content"}); err != nil {
+		t.Fatal(err)
+	}
+	humanDocument, err := service.Get("human.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabledContent := strings.Replace(humanDocument.Content, "ai_editable: false", "ai_editable: true", 1)
+	if err := service.Update(UpdateInput{Path: "human.md", Content: &enabledContent, BaseRevision: humanDocument.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	permissions := Permissions{View: true, Edit: true}
@@ -546,19 +762,38 @@ func TestAIMarksEditedHumanPages(t *testing.T) {
 	if err := service.Create(CreateInput{Path: "blocked.md", Type: "document"}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("AI create error = %v, want forbidden", err)
 	}
-	if _, err := service.Get("human.md"); err != nil {
+	opened, err := service.Get("human.md")
+	if err != nil {
 		t.Fatalf("AI view: %v", err)
 	}
 	content := "Updated by AI"
-	if err := service.Update(UpdateInput{Path: "human.md", Content: &content}); err != nil {
+	result, err := service.UpdateWithResult(UpdateInput{Path: "human.md", Content: &content, BaseRevision: opened.Revision})
+	if err != nil || result.Proposal == nil {
 		t.Fatal(err)
 	}
 	document, err := service.Get("human.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.Owner != "Grace Hopper" || document.ModifiedBy != ProfileAI || !document.AITouched || !strings.Contains(document.Content, `last_modified_by: "ai"`) || !strings.Contains(document.Content, "ai_touched: true") {
-		t.Fatalf("AI-modified document = %#v", document)
+	if document.Owner != "Grace Hopper" || document.ModifiedBy != ProfileHuman || document.Content == content || result.Proposal.Status != ProposalInReview || !strings.Contains(result.Proposal.Diff, "+ Updated by AI") {
+		t.Fatalf("AI proposal or document = %#v, %#v", result.Proposal, document)
+	}
+	if err := service.SetProposalStatus(result.Proposal.ID, ProposalNeedsHumanInput); err != nil {
+		t.Fatalf("set proposal status: %v", err)
+	}
+	if err := service.SetProposalStatus(result.Proposal.ID, ProposalApproved); err != nil {
+		t.Fatalf("approve proposal: %v", err)
+	}
+	service.profile = ProfileSettings{Type: ProfileHuman, FirstName: "Grace", LastName: "Hopper"}
+	if err := service.AcceptProposal(result.Proposal.ID, &content); err != nil {
+		t.Fatal(err)
+	}
+	document, err = service.Get("human.md")
+	if err != nil || !strings.HasSuffix(document.Content, "\n\nUpdated by AI") || document.ModifiedBy != ProfileHuman {
+		t.Fatalf("accepted proposal document = %#v, %v", document, err)
+	}
+	if proposals := service.Proposals(); len(proposals) != 1 || proposals[0].Status != ProposalMerged {
+		t.Fatalf("proposal history = %#v", proposals)
 	}
 }
 

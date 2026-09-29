@@ -37,6 +37,10 @@ function seededPosition(id: string, index: number, total: number) {
   return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
 }
 
+function edgeColor(type: string) {
+  return type === "link" ? "rgba(151, 125, 224, .7)" : "rgba(79, 105, 130, .44)";
+}
+
 export function KnowledgeGraph({ graph, pageTypes, onOpen }: { graph: Graph; pageTypes: PageTypeDefinition[]; onOpen: (node: GraphNode) => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, scale: 1 });
@@ -96,7 +100,7 @@ export function KnowledgeGraph({ graph, pageTypes, onOpen }: { graph: Graph; pag
       for (const edge of edges) {
         const source = edge.sourceNode!; const target = edge.targetNode!;
         const dx = target.x - source.x; const dy = target.y - source.y; const distance = Math.max(1, Math.hypot(dx, dy));
-        const desired = edge.type === "link" ? 105 : 75; const force = (distance - desired) * .0018;
+        const desired = edge.type === "hierarchy" ? 75 : 105; const force = (distance - desired) * .0018;
         source.vx += dx / distance * force; source.vy += dy / distance * force; target.vx -= dx / distance * force; target.vy -= dy / distance * force;
       }
       const cells = new Map<string, SimNode[]>(); const cellSize = 42;
@@ -117,10 +121,10 @@ export function KnowledgeGraph({ graph, pageTypes, onOpen }: { graph: Graph; pag
       const activeQuery = optionsRef.current.query.trim();
       for (const edge of edges) {
         const source = edge.sourceNode!; const target = edge.targetNode!; if (!visible(source) || !visible(target)) continue;
-        if ((edge.type === "hierarchy" && !optionsRef.current.hierarchy) || (edge.type === "link" && !optionsRef.current.links)) continue;
+        if ((edge.type === "hierarchy" && !optionsRef.current.hierarchy) || (edge.type !== "hierarchy" && !optionsRef.current.links)) continue;
         context.beginPath(); context.moveTo(source.x, source.y); context.lineTo(target.x, target.y);
-        context.strokeStyle = edge.type === "link" ? "rgba(151,125,224,.7)" : "rgba(79,105,130,.44)";
-        context.lineWidth = (edge.type === "link" ? 1.35 : .8) / view.scale; context.setLineDash(edge.type === "link" ? [5 / view.scale, 4 / view.scale] : []); context.stroke();
+        context.strokeStyle = edgeColor(edge.type);
+        context.lineWidth = (edge.type === "hierarchy" ? .8 : 1.35) / view.scale; context.setLineDash(edge.type === "hierarchy" ? [] : [5 / view.scale, 4 / view.scale]); context.stroke();
       }
       context.setLineDash([]);
       for (const node of nodes) {
@@ -163,7 +167,7 @@ export function KnowledgeGraph({ graph, pageTypes, onOpen }: { graph: Graph; pag
   if (!graph.nodes.length) return <div className="graph-empty"><strong>{tx("The graph is empty", "Le graphe est vide")}</strong><span>{tx("Create a folder or page to display its relationships.", "Créez un dossier ou une page pour faire apparaître ses relations.")}</span></div>;
 
   return <div className="graph-page">
-    <div className="graph-heading"><div><span className="eyebrow">{tx("CONNECTIONS", "CONNEXIONS")}</span><h1>{tx("Knowledge graph", "Graphe des connaissances")}</h1><p>{tx("Move nodes, zoom and search throughout the vault.", "Déplacez les nœuds, zoomez et recherchez une page dans l’ensemble du vault.")}</p></div><div className="graph-legend"><span><i className="folder" />{tx("Folder", "Dossier")}</span>{pageTypes.map((type) => <span key={type.id}><i style={{ background: type.color }} />{type.label}</span>)}<span><i className="link" />{tx("Link", "Lien")}</span></div></div>
+    <div className="graph-heading"><div><span className="eyebrow">{tx("CONNECTIONS", "CONNEXIONS")}</span><h1>{tx("Knowledge graph", "Graphe des connaissances")}</h1><p>{tx("Move nodes, zoom and search throughout the vault.", "Déplacez les nœuds, zoomez et recherchez une page dans l’ensemble du vault.")}</p></div><div className="graph-legend"><span><i className="folder" />{tx("Folder", "Dossier")}</span>{pageTypes.map((type) => <span key={type.id}><i style={{ background: type.color }} />{type.label}</span>)}<span><i className="link" />{tx("Typed link", "Lien typé")}</span></div></div>
     <div className="graph-canvas">
       <canvas ref={canvasRef} aria-label="Interactive graph of folders and documents" />
       <div className="graph-tools"><div className="graph-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Search for a node…", "Rechercher un nœud…")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}>×</button>}</div><div className="graph-filters"><button className={folders ? "active" : ""} onClick={() => setFolders((value) => !value)}><i className="folder" />{tx("Folders", "Dossiers")}</button><button className={documents ? "active" : ""} onClick={() => setDocuments((value) => !value)}><i className="document" />{tx("Pages", "Pages")}</button><button className={settingsOpen ? "active graph-settings-button" : "graph-settings-button"} onClick={() => setSettingsOpen((open) => !open)} title={tx("Graph settings", "Paramètres du graphe")}><Icons.settings /></button></div></div>
