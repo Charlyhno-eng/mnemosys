@@ -40,6 +40,38 @@ func NewHandler(service *Service) http.Handler {
 	mux.HandleFunc("GET /api/settings/application", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, service.ApplicationSettings())
 	})
+	mux.HandleFunc("POST /api/profiles", func(w http.ResponseWriter, r *http.Request) {
+		var input ProfileInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		settings, err := service.CreateProfile(input)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, settings)
+	})
+	mux.HandleFunc("PUT /api/profiles/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var input ProfileInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		settings, err := service.UpdateProfile(r.PathValue("id"), input)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	})
+	mux.HandleFunc("PUT /api/profiles/{id}/activate", func(w http.ResponseWriter, r *http.Request) {
+		settings, err := service.SelectProfile(r.PathValue("id"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	})
 	mux.HandleFunc("PUT /api/settings/application", func(w http.ResponseWriter, r *http.Request) {
 		var input ApplicationSettingsInput
 		if !decodeJSON(w, r, &input) {

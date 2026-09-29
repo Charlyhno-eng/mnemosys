@@ -15,14 +15,16 @@ import (
 // Service serializes filesystem changes so requests made through this process
 // cannot observe half-completed operations.
 type Service struct {
-	repository    *repository
-	mu            sync.RWMutex
-	configPath    string
-	storagePath   string
-	configured    bool
-	profile       ProfileSettings
-	aiPermissions Permissions
-	proposals     map[string]DocumentProposal
+	repository      *repository
+	mu              sync.RWMutex
+	configPath      string
+	storagePath     string
+	configured      bool
+	profile         ProfileSettings
+	aiPermissions   Permissions
+	profiles        []SavedProfile
+	activeProfileID string
+	proposals       map[string]DocumentProposal
 }
 
 // VaultDirectoryName is the application-owned directory created inside a selected location.
@@ -30,7 +32,12 @@ const VaultDirectoryName = "Mnemosys-Vault"
 
 // NewService creates a service with an already confirmed document directory.
 func NewService(root string) (*Service, error) {
-	return newService(root, root, "", true, defaultProfile(), defaultAIPermissions())
+	s, err := newService(root, root, "", true, defaultProfile(), defaultAIPermissions())
+	if err == nil {
+		s.profiles = []SavedProfile{{ID: "legacy", ProfileSettings: s.profile, Permissions: s.aiPermissions}}
+		s.activeProfileID = "legacy"
+	}
+	return s, err
 }
 
 // NewConfigurableService creates a service backed by a persisted storage selection.
@@ -39,8 +46,10 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 	root := defaultRoot
 	storagePath := defaultRoot
 	configured := false
-	profile := defaultProfile()
+	var profile ProfileSettings
 	aiPermissions := defaultAIPermissions()
+	var profiles []SavedProfile
+	activeProfileID := ""
 	data, err := os.ReadFile(configPath)
 	if err == nil {
 		config, err := parseApplicationConfig(data)
@@ -49,6 +58,8 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 		}
 		profile = config.Profile
 		aiPermissions = config.AIPermissions
+		profiles = config.Profiles
+		activeProfileID = config.ActiveProfileID
 		if config.StoragePath != "" {
 			storagePath, root, err = prepareVaultRoot(config.StoragePath)
 			if err != nil {
@@ -59,7 +70,12 @@ func NewConfigurableService(defaultRoot, configPath string) (*Service, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("read application config: %w", err)
 	}
-	return newService(root, storagePath, configPath, configured, profile, aiPermissions)
+	s, err := newService(root, storagePath, configPath, configured, profile, aiPermissions)
+	if err == nil {
+		s.profiles = profiles
+		s.activeProfileID = activeProfileID
+	}
+	return s, err
 }
 
 // newService validates the root and constructs the shared service state.
@@ -76,6 +92,9 @@ func newService(root, storagePath, configPath string, configured bool, profile P
 }
 
 func profileName(profile ProfileSettings) string {
+	if profile.Type == ProfileAI && profile.Name != "" {
+		return profile.Name
+	}
 	name := strings.TrimSpace(profile.FirstName + " " + profile.LastName)
 	if name != "" {
 		return name
@@ -86,7 +105,9 @@ func profileName(profile ProfileSettings) string {
 	return "Human"
 }
 
-func (s *Service) allowed(permission bool) bool { return s.profile.Type == ProfileHuman || permission }
+func (s *Service) allowed(permission bool) bool {
+	return s.profile.Type == ProfileHuman || (s.profile.Type == ProfileAI && permission)
+}
 
 // Tree returns the complete visible directory and Markdown document hierarchy.
 func (s *Service) Tree() ([]Node, error) {
@@ -127,8 +148,8 @@ func (s *Service) Search(query string, mode SearchMode, scope string) (SearchRes
 	if mode == "" {
 		mode = SearchLexical
 	}
-	if mode != SearchLexical && mode != SearchHybrid {
-		return SearchResponse{}, fmt.Errorf("%w: mode must be lexical or hybrid", ErrInvalidSearch)
+	if mode != SearchNames && mode != SearchLexical && mode != SearchHybrid {
+		return SearchResponse{}, fmt.Errorf("%w: mode must be names, lexical or hybrid", ErrInvalidSearch)
 	}
 	if scope != "" {
 		if err := validatePath(scope, false); err != nil {
@@ -424,7 +445,151 @@ func (s *Service) Storage() StorageSettings {
 func (s *Service) ApplicationSettings() ApplicationSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return ApplicationSettings{PageTypes: defaultPageTypes(), Profile: s.profile, AIPermissions: s.aiPermissions}
+	return s.applicationSettingsLocked()
+}
+
+func (s *Service) applicationSettingsLocked() ApplicationSettings {
+	profiles := append([]SavedProfile{}, s.profiles...)
+	return ApplicationSettings{PageTypes: defaultPageTypes(), Profile: s.profile, AIPermissions: s.aiPermissions, Profiles: profiles, ActiveProfileID: s.activeProfileID}
+}
+
+func (s *Service) configLocked() applicationConfig {
+	path := ""
+	if s.configured {
+		path = s.storagePath
+	}
+	return applicationConfig{StoragePath: path, Profile: s.profile, AIPermissions: s.aiPermissions, Profiles: s.profiles, ActiveProfileID: s.activeProfileID}
+}
+
+func (s *Service) persistProfilesLocked(profiles []SavedProfile, activeID string) error {
+	if s.configPath == "" {
+		return nil
+	}
+	config := s.configLocked()
+	config.Profiles = profiles
+	config.ActiveProfileID = activeID
+	return persistApplicationConfig(s.configPath, config)
+}
+
+func validateNewProfile(profile ProfileSettings) (ProfileSettings, error) {
+	profile, err := validateProfile(profile)
+	if err != nil {
+		return ProfileSettings{}, err
+	}
+	if profile.Type == ProfileHuman && (profile.FirstName == "" || profile.LastName == "" || profile.Name != "") {
+		return ProfileSettings{}, fmt.Errorf("%w: human profiles require first and last names", ErrInvalidSettings)
+	}
+	if profile.Type == ProfileAI && (profile.Name == "" || profile.FirstName != "" || profile.LastName != "") {
+		return ProfileSettings{}, fmt.Errorf("%w: AI profiles require one name", ErrInvalidSettings)
+	}
+	return profile, nil
+}
+
+func validateProfilePermissions(profile ProfileSettings, permissions Permissions) error {
+	if profile.Type == ProfileAI && !permissions.View && (permissions.Create || permissions.Edit || permissions.Delete) {
+		return fmt.Errorf("%w: AI view permission is required for other rights", ErrInvalidSettings)
+	}
+	return nil
+}
+
+func (s *Service) CreateProfile(input ProfileInput) (ApplicationSettings, error) {
+	profile, err := validateNewProfile(input.Profile)
+	if err != nil {
+		return ApplicationSettings{}, err
+	}
+	if err := validateProfilePermissions(profile, input.Permissions); err != nil {
+		return ApplicationSettings{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.profile.Type == ProfileAI {
+		return ApplicationSettings{}, ErrForbidden
+	}
+	id, err := newDocumentID()
+	if err != nil {
+		return ApplicationSettings{}, err
+	}
+	permissions := input.Permissions
+	if profile.Type == ProfileHuman {
+		permissions = defaultAIPermissions()
+	}
+	profiles := append(append([]SavedProfile{}, s.profiles...), SavedProfile{ID: id, ProfileSettings: profile, Permissions: permissions})
+	activeID := s.activeProfileID
+	if activeID == "" && profile.Type == ProfileHuman {
+		activeID = id
+	}
+	if err := s.persistProfilesLocked(profiles, activeID); err != nil {
+		return ApplicationSettings{}, err
+	}
+	s.profiles, s.activeProfileID = profiles, activeID
+	if activeID == id {
+		s.activateProfileLocked(profiles[len(profiles)-1])
+	}
+	return s.applicationSettingsLocked(), nil
+}
+
+func (s *Service) activateProfileLocked(entry SavedProfile) {
+	s.profile, s.aiPermissions = entry.ProfileSettings, entry.Permissions
+	s.repository.defaultOwner = profileName(entry.ProfileSettings)
+	s.repository.defaultTeam = entry.Team
+}
+
+func (s *Service) SelectProfile(id string) (ApplicationSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.profiles {
+		if entry.ID != id {
+			continue
+		}
+		if s.profile.Type == ProfileAI || entry.Type != ProfileHuman {
+			return ApplicationSettings{}, ErrForbidden
+		}
+		if err := s.persistProfilesLocked(s.profiles, id); err != nil {
+			return ApplicationSettings{}, err
+		}
+		s.activeProfileID = id
+		s.activateProfileLocked(entry)
+		return s.applicationSettingsLocked(), nil
+	}
+	return ApplicationSettings{}, ErrNotFound
+}
+
+func (s *Service) UpdateProfile(id string, input ProfileInput) (ApplicationSettings, error) {
+	profile, err := validateNewProfile(input.Profile)
+	if err != nil {
+		return ApplicationSettings{}, err
+	}
+	if err := validateProfilePermissions(profile, input.Permissions); err != nil {
+		return ApplicationSettings{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.profile.Type != ProfileHuman {
+		return ApplicationSettings{}, ErrForbidden
+	}
+	profiles := append([]SavedProfile{}, s.profiles...)
+	for i := range profiles {
+		if profiles[i].ID != id {
+			continue
+		}
+		if profiles[i].Type != profile.Type {
+			return ApplicationSettings{}, fmt.Errorf("%w: profile type cannot change", ErrInvalidSettings)
+		}
+		permissions := input.Permissions
+		if profile.Type == ProfileHuman {
+			permissions = defaultAIPermissions()
+		}
+		profiles[i] = SavedProfile{ID: id, ProfileSettings: profile, Permissions: permissions}
+		if err := s.persistProfilesLocked(profiles, s.activeProfileID); err != nil {
+			return ApplicationSettings{}, err
+		}
+		s.profiles = profiles
+		if id == s.activeProfileID {
+			s.activateProfileLocked(profiles[i])
+		}
+		return s.applicationSettingsLocked(), nil
+	}
+	return ApplicationSettings{}, ErrNotFound
 }
 
 func (s *Service) ConfigureApplication(input ApplicationSettingsInput) (ApplicationSettings, error) {
@@ -439,20 +604,31 @@ func (s *Service) ConfigureApplication(input ApplicationSettingsInput) (Applicat
 			return ApplicationSettings{}, ErrForbidden
 		}
 	}
-	if s.configPath != "" {
-		storagePath := ""
-		if s.configured {
-			storagePath = s.storagePath
+	profiles := append([]SavedProfile{}, s.profiles...)
+	activeID := s.activeProfileID
+	if activeID == "" {
+		activeID = "legacy"
+		profiles = append(profiles, SavedProfile{ID: activeID, ProfileSettings: profile, Permissions: input.AIPermissions})
+	} else {
+		for i := range profiles {
+			if profiles[i].ID == activeID {
+				profiles[i].ProfileSettings = profile
+				profiles[i].Permissions = input.AIPermissions
+				break
+			}
 		}
-		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, Profile: profile, AIPermissions: input.AIPermissions}); err != nil {
+	}
+	if s.configPath != "" {
+		if err := s.persistProfilesLocked(profiles, activeID); err != nil {
 			return ApplicationSettings{}, err
 		}
 	}
 	s.profile = profile
 	s.aiPermissions = input.AIPermissions
+	s.profiles, s.activeProfileID = profiles, activeID
 	s.repository.defaultOwner = profileName(profile)
 	s.repository.defaultTeam = profile.Team
-	return ApplicationSettings{PageTypes: defaultPageTypes(), Profile: s.profile, AIPermissions: s.aiPermissions}, nil
+	return s.applicationSettingsLocked(), nil
 }
 
 // ConfigureStorage validates, persists, and activates a new document directory.
@@ -477,7 +653,9 @@ func (s *Service) ConfigureStorage(path string) (StorageSettings, error) {
 	defer s.mu.Unlock()
 	settings := StorageSettings{Path: storagePath, VaultPath: root, Configured: true}
 	if s.configPath != "" {
-		if err := persistApplicationConfig(s.configPath, applicationConfig{StoragePath: storagePath, Profile: s.profile, AIPermissions: s.aiPermissions}); err != nil {
+		config := s.configLocked()
+		config.StoragePath = storagePath
+		if err := persistApplicationConfig(s.configPath, config); err != nil {
 			return StorageSettings{}, err
 		}
 	}

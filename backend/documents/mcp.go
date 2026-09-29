@@ -29,10 +29,11 @@ func mcpTools() []mcpTool {
 		return mcpTool{name, description, map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}}
 	}
 	return []mcpTool{
-		tool("search", "Search page/folder names, metadata and content. mode: lexical (default) or hybrid; scope: optional vault-relative folder.", []string{"query"}, "query", "mode", "scope"),
+		tool("search", "Search page/folder names, metadata and content. mode: names (file/folder paths only), lexical (default), or hybrid (lexical plus semantic ranking); scope: optional vault-relative folder.", []string{"query"}, "query", "mode", "scope"),
 		tool("read", "Read a Markdown page including frontmatter and its revision.", []string{"path"}, "path"),
 		tool("explore", "Return the recursive page/folder tree, optionally below a vault-relative folder path.", []string{}, "path"),
 		tool("create", "Create a page or folder. type: document or directory. Parents must exist. pageType defaults to general. Requires AI create permission.", []string{"path", "type"}, "path", "type", "content", "pageType"),
+		tool("delete", "Delete a page or folder recursively. Requires AI delete permission.", []string{"path"}, "path"),
 		tool("update", "Propose replacement Markdown for human review; does not merge. Requires AI view/edit, ai_editable and the revision returned by read.", []string{"path", "content", "baseRevision"}, "path", "content", "baseRevision"),
 		tool("link", "Propose an ordinary wiki link appended to a page. target is an existing vault-relative page/folder path. Requires AI view/edit, ai_editable and baseRevision.", []string{"path", "target", "baseRevision"}, "path", "target", "baseRevision", "label"),
 		tool("validate", "Check a stored page or supplied Markdown for valid identity, page type and resolvable wiki links. Read-only; does not approve proposals.", []string{"path"}, "path", "content"),
@@ -170,7 +171,7 @@ func (s *Service) serveMCP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		value, callErr := s.callMCPTool(params.Name, arguments)
+		value, callErr := s.callMCPToolForProfile(r.Header.Get("X-Mnemosys-Profile-ID"), params.Name, arguments)
 		if callErr != nil {
 			value = map[string]any{"error": callErr.Error()}
 			var conflict *EditConflictError
@@ -192,10 +193,30 @@ func (s *Service) serveMCP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) callMCPTool(name string, args map[string]string) (any, error) {
+	return s.callMCPToolForProfile("", name, args)
+}
+
+func (s *Service) callMCPToolForProfile(profileID, name string, args map[string]string) (any, error) {
 	// Keep permission checks, reads, revision checks and proposal creation atomic.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.aiPermissions.View {
+	permissions := s.aiPermissions
+	owner := "AI"
+	if profileID != "" {
+		found := false
+		for _, entry := range s.profiles {
+			if entry.ID == profileID && entry.Type == ProfileAI {
+				permissions, owner, found = entry.Permissions, profileName(entry.ProfileSettings), true
+				break
+			}
+		}
+		if !found {
+			return nil, ErrForbidden
+		}
+	} else if s.activeProfileID != "legacy" {
+		permissions = Permissions{}
+	}
+	if !permissions.View {
 		return nil, ErrForbidden
 	}
 	path := args["path"]
@@ -205,7 +226,7 @@ func (s *Service) callMCPTool(name string, args map[string]string) (any, error) 
 		if mode == "" {
 			mode = SearchLexical
 		}
-		if len(query) > 200 || (mode != SearchLexical && mode != SearchHybrid) {
+		if len(query) > 200 || (mode != SearchNames && mode != SearchLexical && mode != SearchHybrid) {
 			return nil, ErrInvalidSearch
 		}
 		if scope != "" {
@@ -229,7 +250,7 @@ func (s *Service) callMCPTool(name string, args map[string]string) (any, error) 
 		}
 		return s.repository.readDirectory(s.repository.absolute(path), path)
 	case "create":
-		if !s.aiPermissions.Create {
+		if !permissions.Create {
 			return nil, ErrForbidden
 		}
 		if aiEditableFromContent(args["content"]) {
@@ -242,10 +263,18 @@ func (s *Service) callMCPTool(name string, args map[string]string) (any, error) 
 		if !containsPageType(pageType) {
 			return nil, ErrInvalidPageType
 		}
-		err := s.repository.create(CreateInput{Path: path, Type: args["type"], PageType: pageType, Content: args["content"], Owner: "AI", ModifiedBy: ProfileAI})
+		err := s.repository.create(CreateInput{Path: path, Type: args["type"], PageType: pageType, Content: args["content"], Owner: owner, ModifiedBy: ProfileAI})
 		return map[string]string{"path": path}, err
+	case "delete":
+		if !permissions.Delete {
+			return nil, ErrForbidden
+		}
+		if err := s.repository.remove(path); err != nil {
+			return nil, err
+		}
+		return map[string]string{"path": path}, nil
 	case "update", "link":
-		if !s.aiPermissions.Edit {
+		if !permissions.Edit {
 			return nil, ErrForbidden
 		}
 		document, err := s.repository.get(path)

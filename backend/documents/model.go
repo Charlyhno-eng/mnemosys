@@ -22,9 +22,22 @@ type PageTypeDefinition struct {
 }
 
 type ApplicationSettings struct {
-	PageTypes     []PageTypeDefinition `json:"pageTypes"`
-	Profile       ProfileSettings      `json:"profile"`
-	AIPermissions Permissions          `json:"aiPermissions"`
+	PageTypes       []PageTypeDefinition `json:"pageTypes"`
+	Profile         ProfileSettings      `json:"profile"`
+	AIPermissions   Permissions          `json:"aiPermissions"`
+	Profiles        []SavedProfile       `json:"profiles"`
+	ActiveProfileID string               `json:"activeProfileId"`
+}
+
+type SavedProfile struct {
+	ID string `json:"id"`
+	ProfileSettings
+	Permissions Permissions `json:"permissions"`
+}
+
+type ProfileInput struct {
+	Profile     ProfileSettings `json:"profile"`
+	Permissions Permissions     `json:"permissions"`
 }
 
 type ApplicationSettingsInput struct {
@@ -36,6 +49,7 @@ type ProfileSettings struct {
 	Type      ProfileType `json:"type"`
 	FirstName string      `json:"firstName"`
 	LastName  string      `json:"lastName"`
+	Name      string      `json:"name"`
 	Team      string      `json:"team"`
 }
 
@@ -185,6 +199,7 @@ type Graph struct {
 type SearchMode string
 
 const (
+	SearchNames   SearchMode = "names"
 	SearchLexical SearchMode = "lexical"
 	SearchHybrid  SearchMode = "hybrid"
 )

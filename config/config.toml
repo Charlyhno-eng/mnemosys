@@ -1,14 +1,29 @@
+# Mnemosys application configuration.
+
 [storage]
 path = ""
 
-[profile]
+[profiles]
+active_id = "legacy"
+
+[profiles.legacy]
 type = "human"
 first_name = ""
 last_name = ""
+name = ""
 team = ""
-
-[ai_permissions]
 view = true
 create = true
 edit = true
 delete = true
+
+[profiles.cf6808da-9313-4e1a-97ec-7fe81e8130cb]
+type = "ai"
+first_name = ""
+last_name = ""
+name = ""
+team = ""
+view = true
+create = false
+edit = true
+delete = false

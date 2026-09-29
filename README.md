@@ -6,15 +6,15 @@
 
 Mnemosys is a shared workspace for durable organizational knowledge. It keeps documentation in portable Markdown files owned by the user, organized through nested folders, ordinary wiki links, and a knowledge graph.
 
-Each page stores stable identity metadata, its page type, owner name, configurable team, concerned application name, application-relative folder path, modification actor, AI-touch state, and timestamp in Markdown frontmatter. Descriptions are not stored. Pages include `ai_editable: false` by default; a human can enable AI editing by editing the Markdown frontmatter. The backend enforces this per-page protection in addition to global AI permissions. Metadata is kept exclusively in the Markdown file, is not duplicated in an application panel, and is excluded from rendered Markdown previews.
+Each page stores stable identity metadata, its page type, owner name, configurable team, concerned application name, application-relative folder path, modification actor, AI-touch state, and timestamp in Markdown frontmatter. Descriptions are not stored. Pages include `ai_editable: false` by default; a human can enable AI editing by editing the Markdown frontmatter. The backend enforces this per-page protection in addition to the selected AI profile permissions. Metadata is kept exclusively in the Markdown file, is not duplicated in an application panel, and is excluded from rendered Markdown previews.
 
-The home page includes a Profile and access overview showing the active identity, the current profile's rights, and the AI permission matrix. Its profile and AI-rights controls open the persisted settings form; human profiles have full access and can manage AI view, create, edit, and delete rights, while AI profiles cannot raise their own permissions. Storage is selected locally and pages, folders, and media are kept inside a dedicated `Mnemosys-Vault` directory. There is no database.
+The landing page is a profile page. A new installation starts with no profiles. Add a human profile with first and last names to start using documentation; add AI profiles with a single name and assign view, create, edit, and delete rights to each one when creating or editing it. Human profiles have full browser access. Existing single-profile configurations are migrated when saved, preserving their identity and AI permission settings. Profiles and the active human profile are stored in `config/config.toml`. The Settings drawer manages storage only. Pages, folders, and media stay inside a dedicated `Mnemosys-Vault` directory. There is no database.
 
-AI document changes are submitted as Markdown work items with explicit statuses: draft, in review, needs human input, approved, rejected, or merged. The home page shows a line-based diff, lets the user edit the proposed Markdown, change its collaboration status, merge it, or reject it. A proposal never changes the stored page until it is explicitly merged; resolved proposals remain visible as history.
+AI document changes are submitted as Markdown work items with explicit statuses: draft, in review, needs human input, approved, rejected, or merged. The documentation page shows a line-based diff, lets the user edit the proposed Markdown, change its collaboration status, merge it, or reject it. A proposal never changes the stored page until it is explicitly merged; resolved proposals remain visible as history.
 
 Pages can reference files or folders with an ordinary wiki link such as `[[architecture]]` or `[[architecture|Architecture]]`. The editor link picker creates these links, backlinks identify references, and the graph displays each link edge.
 
-The home search supports two complementary modes. Lexical mode is the default and ranks exact terms across file and folder names, paths, metadata, and Markdown content. Hybrid mode keeps every lexical signal and augments page results with local semantic ranking derived from term context across the vault. Results identify whether they matched lexically, semantically, or both. Search remains local and requires no external embedding service or database.
+Documentation search offers three selectable modes. Names mode matches file and folder paths and ignores Markdown page content. Lexical mode is the default and ranks exact terms across names, paths, metadata, and Markdown content. Hybrid mode keeps every lexical signal and augments page results with local semantic ranking derived from term context across the vault. Results identify whether they matched by name, lexically, semantically, or through both lexical and semantic signals. Search remains local and requires no external embedding service or database.
 
 Multiple people and agents can edit through the same Mnemosys server without silently overwriting one another. Every document read includes a content revision, and autosave submits that revision with its update. Content updates require `baseRevision` at both the REST and service layers; missing revisions are rejected before any accompanying move or write. If another writer saved first, Mnemosys keeps the local draft, returns the latest saved Markdown to clients with view permission, and asks the editor to review it before either loading the latest version or explicitly replacing it. Edits to different pages do not conflict, while same-page conflicts are resolved deliberately.
 
@@ -44,20 +44,23 @@ go run ./apps/api
 npm --prefix frontend run dev
 ```
 
+Open the app, add a human profile on the Profiles page, then choose a storage folder in Settings. Add AI profiles on the same page and assign their rights there.
+
 ## Native MCP for local agents
 
 Start the API as described above, then configure your agent's MCP client with the Streamable HTTP URL `http://127.0.0.1:8080/mcp` (adjust the port if you change `-addr`). The endpoint implements protocol version `2025-06-18`, initialization, ping, tool discovery, and tool calls. It returns JSON responses and uses no sessions or persistent SSE stream; GET and DELETE return HTTP 405. No separate MCP process or dependency is required.
 
 The endpoint is intended for trusted agents on the same machine. It requires a loopback peer and a localhost/loopback Host, and rejects browser origins that differ from the API origin. It has no user authentication or remote-access configuration; do not expose it through a reverse proxy. Clients must send `Content-Type: application/json`, `Accept: application/json, text/event-stream`, and the negotiated `MCP-Protocol-Version: 2025-06-18` header after initialization. Request bodies are limited to 1 MiB.
 
-All tool calls require AI view permission and always act as AI, regardless of the profile selected in the browser. A human can configure AI permissions in Settings.
+MCP tool calls always act as AI. Configure each AI profile on the Profiles page, then send its `id` from `GET /api/settings/application` in the `X-Mnemosys-Profile-ID` header on MCP requests. The backend applies that profile's permissions and uses its name as the owner of created pages. New configurations deny MCP tool calls without a profile ID. The local MCP endpoint does not authenticate callers; profile IDs identify a policy, not a secret credential. Only trusted local agents should be given access to this endpoint.
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
-| `search` | `query`; optional `mode`, `scope` | Search names, metadata and content using `lexical` (default) or `hybrid` mode. |
+| `search` | `query`; optional `mode`, `scope` | Search names, metadata and content using `names` (file/folder paths only), `lexical` (default), or `hybrid` (lexical plus semantic ranking) mode. |
 | `read` | `path` | Read a Markdown page, including frontmatter and its current revision. |
 | `explore` | Optional `path` | Return the recursive vault tree or a folder's contents. |
 | `create` | `path`, `type`; optional `content`, `pageType` | Create a `document` or `directory` immediately with AI create permission. Parents must exist; page type defaults to `general`. An agent cannot enable `ai_editable` at creation. |
+| `delete` | `path` | Delete a page or folder recursively with AI delete permission. |
 | `update` | `path`, `content`, `baseRevision` | Submit replacement Markdown as a proposal requiring human review. |
 | `link` | `path`, `target`, `baseRevision`; optional `label` | Propose appending an ordinary wiki link to an existing page or folder. Page targets use stable UUID links. |
 | `validate` | `path`; optional `content` | Check a stored page or proposed content against its UUID, page type and resolvable wiki links. Returns `valid` and `issues`; does not approve or merge a proposal. |

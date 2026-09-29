@@ -28,6 +28,9 @@ func (r *repository) search(query string, mode SearchMode, scope string) ([]Sear
 		return nil, err
 	}
 	nodes := flattenSearchNodes(tree, scope)
+	if mode == SearchNames {
+		return searchNodeNames(nodes, query), nil
+	}
 	indexed := make([]indexedDocument, 0, len(nodes))
 	for _, node := range nodes {
 		document := Document{}
@@ -95,6 +98,53 @@ func (r *repository) search(query string, mode SearchMode, scope string) ([]Sear
 		results = results[:50]
 	}
 	return results, nil
+}
+
+func searchNodeNames(nodes []Node, query string) []SearchResult {
+	queryTokens := searchTokens(query)
+	results := make([]SearchResult, 0)
+	phrase := strings.ToLower(strings.TrimSpace(query))
+	for _, node := range nodes {
+		path := strings.ToLower(node.Path)
+		pathTokens := tokenFrequency(searchTokens(node.Path))
+		score := 0.0
+		if phrase != "" && strings.Contains(path, phrase) {
+			score += 12
+		}
+		for _, token := range queryTokens {
+			score += float64(pathTokens[token]) * 6
+		}
+		if score == 0 {
+			continue
+		}
+		title := node.Title
+		if title == "" {
+			title = strings.TrimSuffix(node.Name, ".md")
+		}
+		results = append(results, SearchResult{
+			Path:       node.Path,
+			Type:       node.Type,
+			Name:       node.Name,
+			Title:      title,
+			PageType:   node.PageType,
+			Score:      score,
+			MatchTypes: []string{"name"},
+		})
+	}
+	return sortSearchResults(results)
+}
+
+func sortSearchResults(results []SearchResult) []SearchResult {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score == results[j].Score {
+			return results[i].Path < results[j].Path
+		}
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > 50 {
+		results = results[:50]
+	}
+	return results
 }
 
 func flattenSearchNodes(nodes []Node, scope string) []Node {

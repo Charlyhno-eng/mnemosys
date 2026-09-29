@@ -469,6 +469,57 @@ func TestSearchKeepsLexicalResultsAndAddsSemanticMatches(t *testing.T) {
 	}
 }
 
+func TestSearchFindsFileAndFolderNamesWithoutMatchingMarkdownContent(t *testing.T) {
+	service, _ := newTestService(t)
+	for _, input := range []CreateInput{
+		{Path: "project-quasar", Type: "directory"},
+		{Path: "project-quasar/summary.md", Type: "document", Content: "A short summary."},
+		{Path: "release-checklist.md", Type: "document", Content: "This page mentions xylophone only in its content."},
+	} {
+		if err := service.Create(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	folderResults, err := service.Search("project-quasar", SearchNames, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFolder := false
+	for _, result := range folderResults.Results {
+		if result.Path == "project-quasar" && result.Type == "directory" && len(result.MatchTypes) == 1 && result.MatchTypes[0] == "name" {
+			foundFolder = true
+		}
+	}
+	if !foundFolder {
+		t.Fatalf("folder name results = %#v", folderResults.Results)
+	}
+
+	fileResults, err := service.Search("release-checklist", SearchNames, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fileResults.Results) != 1 || fileResults.Results[0].Path != "release-checklist.md" || fileResults.Results[0].Snippet != "" {
+		t.Fatalf("file name results = %#v", fileResults.Results)
+	}
+	mcpValue, err := service.callMCPTool("search", map[string]string{"query": "release-checklist", "mode": "names"})
+	if err != nil {
+		t.Fatalf("MCP name search: %v", err)
+	}
+	mcpResults, ok := mcpValue.(SearchResponse)
+	if !ok || mcpResults.Mode != SearchNames || len(mcpResults.Results) != 1 || mcpResults.Results[0].Path != "release-checklist.md" {
+		t.Fatalf("MCP name search results = %#v", mcpValue)
+	}
+
+	contentOnlyResults, err := service.Search("xylophone", SearchNames, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contentOnlyResults.Results) != 0 {
+		t.Fatalf("name search returned content-only matches = %#v", contentOnlyResults.Results)
+	}
+}
+
 func TestSearchValidatesModeQueryAndScope(t *testing.T) {
 	service, _ := newTestService(t)
 	if _, err := service.Search("query", "unknown", ""); !errors.Is(err, ErrInvalidSearch) {
@@ -673,6 +724,9 @@ func TestConfigurableStoragePersistsAndReloads(t *testing.T) {
 	}
 	if config := string(configData); !strings.Contains(config, "[storage]") || !strings.Contains(config, `path = "`+selectedRoot+`"`) {
 		t.Fatalf("persisted config is not TOML: %q", config)
+	}
+	if _, err := service.CreateProfile(ProfileInput{Profile: ProfileSettings{Type: ProfileHuman, FirstName: "Grace", LastName: "Hopper"}}); err != nil {
+		t.Fatal(err)
 	}
 	if err := service.Create(CreateInput{Path: "persisted.md", Type: "document", Content: "saved"}); err != nil {
 		t.Fatal(err)

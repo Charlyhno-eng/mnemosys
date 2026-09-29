@@ -148,6 +148,22 @@ func TestHandlerReturnsHybridSearchResults(t *testing.T) {
 	}
 }
 
+func TestHandlerReturnsNameSearchResults(t *testing.T) {
+	service, _ := newTestService(t)
+	if err := service.Create(CreateInput{Path: "handbook", Type: "directory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(CreateInput{Path: "handbook/onboarding.md", Type: "document", Content: "New employee steps."}); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/documents/search?q=onboarding&mode=names", nil)
+	NewHandler(service).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"mode":"names"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"path":"handbook/onboarding.md"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"name"`)) {
+		t.Fatalf("name search status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHandlerRejectsUnknownJSONFields(t *testing.T) {
 	service, _ := newTestService(t)
 	handler := NewHandler(service)

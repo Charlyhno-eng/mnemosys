@@ -6,7 +6,7 @@ import { Icons } from "./components/Icons";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownPreview } from "./components/MarkdownPreview";
-import { APIError, api, type ApplicationSettings, type DirectoryListing, type Document, type DocumentProposal, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type Permissions, type ProfileSettings, type ProposalStatus, type SearchMode, type SearchResult, type StorageSettings } from "./lib/api";
+import { APIError, api, type ApplicationSettings, type DirectoryListing, type Document, type DocumentProposal, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type Permissions, type ProfileSettings, type SavedProfile, type ProposalStatus, type SearchMode, type SearchResult, type StorageSettings } from "./lib/api";
 
 type Modal =
   | { kind: "create"; type: Node["type"]; parent: string }
@@ -92,6 +92,7 @@ export function App() {
   const selectedPath = searchParams.get("doc");
   const spacePath = searchParams.get("space");
   const graphOpen = searchParams.get("view") === "graph";
+  const docsOpen = searchParams.get("view") === "docs";
   const [tree, setTree] = useState<Node[]>([]);
   const [graph, setGraph] = useState<Graph>({ nodes: [], edges: [] });
   const [content, setContent] = useState("");
@@ -117,9 +118,7 @@ export function App() {
   const [uploading, setUploading] = useState(false);
   const [imageDrag, setImageDrag] = useState(false);
   const [storage, setStorage] = useState<StorageSettings | null>(null);
-  const [applicationSettings, setApplicationSettings] = useState<ApplicationSettings>({ pageTypes: fallbackPageTypes, profile: { type: "human", firstName: "", lastName: "", team: "" }, aiPermissions: { view: true, create: false, edit: false, delete: false } });
-  const [draftProfile, setDraftProfile] = useState<ProfileSettings>({ type: "human", firstName: "", lastName: "", team: "" });
-  const [draftPermissions, setDraftPermissions] = useState<Permissions>({ view: true, create: false, edit: false, delete: false });
+  const [applicationSettings, setApplicationSettings] = useState<ApplicationSettings>({ pageTypes: fallbackPageTypes, profile: { type: "human", firstName: "", lastName: "", name: "", team: "" }, aiPermissions: { view: false, create: false, edit: false, delete: false }, profiles: [], activeProfileId: "" });
   const [storageOpen, setStorageOpen] = useState(false);
   const [storagePath, setStoragePath] = useState("");
   const [storageBusy, setStorageBusy] = useState(false);
@@ -144,7 +143,7 @@ export function App() {
   const homeNodes = spaceNode?.type === "directory" ? spaceNode.children ?? [] : tree;
   const dirty = loadedPath === selectedPath && content !== savedContent;
   const aiEditable = documentProperty(content, "ai_editable", "false") === "true";
-  const activePermissions = applicationSettings.profile.type === "human" ? { view: true, create: true, edit: true, delete: true } : applicationSettings.aiPermissions;
+  const activePermissions = !applicationSettings.activeProfileId ? { view: false, create: false, edit: false, delete: false } : applicationSettings.profile.type === "human" ? { view: true, create: true, edit: true, delete: true } : applicationSettings.aiPermissions;
   const canEditDocument = activePermissions.edit && (applicationSettings.profile.type === "human" || aiEditable);
   const backlinks = useMemo(() => selectedPath ? graph.edges.flatMap((edge) => {
     if (edge.type === "hierarchy" || edge.target !== selectedPath) return [];
@@ -162,18 +161,18 @@ export function App() {
     setProposals(await api.proposals());
   }, []);
 
-  useEffect(() => { refreshTree().catch((error) => flash(error.message, "error")).finally(() => setLoading(false)); }, [refreshTree, flash]);
   useEffect(() => {
     Promise.all([api.storage(), api.applicationSettings()]).then(([storageSettings, appSettings]) => {
       setStorage(storageSettings);
       setStoragePath(storageSettings.path);
       setApplicationSettings(appSettings);
-      setDraftProfile(appSettings.profile);
-      setDraftPermissions(appSettings.aiPermissions);
-      api.proposals().then(setProposals).catch(() => setProposals([]));
+      if (appSettings.activeProfileId && (appSettings.profile.type === "human" || appSettings.aiPermissions.view)) {
+        void refreshTree().catch((error) => flash(error.message, "error")).finally(() => setLoading(false));
+        api.proposals().then(setProposals).catch(() => setProposals([]));
+      } else setLoading(false);
       document.documentElement.lang = "en";
     }).catch((error) => flash(error instanceof Error ? error.message : "Settings are unavailable.", "error"));
-  }, [flash]);
+  }, [flash, refreshTree]);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 3500);
@@ -207,7 +206,7 @@ export function App() {
   useEffect(() => {
     let active = true;
     setLinkPickerOpen(false);
-    if (!selectedPath) { setLoadedPath(null); resetHistory(""); setSavedContent(""); setRevision(""); setEditConflict(null); return; }
+    if (!selectedPath || !applicationSettings.activeProfileId || !activePermissions.view) { setLoadedPath(null); resetHistory(""); setSavedContent(""); setRevision(""); setEditConflict(null); return; }
     setLoadedPath(null);
     api.get(selectedPath).then((document) => {
       if (!active) return;
@@ -220,7 +219,7 @@ export function App() {
       setMode("preview");
     }).catch((error) => { if (active) flash(error.message, "error"); });
     return () => { active = false; };
-  }, [selectedPath, flash]);
+  }, [selectedPath, applicationSettings.activeProfileId, activePermissions.view, flash]);
 
   const save = useCallback(async (path = selectedPath, value = content, baseRevision = revision) => {
     if (!path || loadedPath !== path || !baseRevision || saveInFlightRef.current) return false;
@@ -529,14 +528,9 @@ export function App() {
     setStorageBusy(true);
     try {
       if (dirty && selectedPath && !(await save(selectedPath, content))) return;
-      const [storageSettings, appSettings] = await Promise.all([
-        storage?.path === storagePath.trim() ? Promise.resolve(storage) : api.configureStorage(storagePath.trim()),
-        api.configureApplication(draftProfile, draftPermissions),
-      ]);
+      const storageSettings = storage?.path === storagePath.trim() ? storage : await api.configureStorage(storagePath.trim());
       setStorage(storageSettings);
       setStoragePath(storageSettings.path);
-      setApplicationSettings(appSettings);
-      setProposals(await api.proposals());
       setStorageOpen(false);
       setSearchParams({});
       await refreshTree();
@@ -580,10 +574,25 @@ export function App() {
   }
 
   function openStoragePicker() {
-    setDraftProfile({ ...applicationSettings.profile });
-    setDraftPermissions({ ...applicationSettings.aiPermissions });
     setStorageOpen(true);
     void browseStorage(storage?.configured ? storage.path : undefined);
+  }
+
+  async function saveProfile(id: string | null, profile: ProfileSettings, permissions: Permissions) {
+    const settings = id ? await api.updateProfile(id, profile, permissions) : await api.createProfile(profile, permissions);
+    setApplicationSettings(settings);
+    if (settings.activeProfileId && (settings.profile.type === "human" || settings.aiPermissions.view)) void refreshTree().catch((error) => flash(error.message, "error"));
+    flash(id ? "Profile updated." : "Profile added.");
+  }
+
+  async function activateProfile(id: string) {
+    if (dirty && selectedPath && !(await save(selectedPath, content))) return;
+    const settings = await api.activateProfile(id);
+    setApplicationSettings(settings);
+    setSearchParams({});
+    if (settings.profile.type === "human" || settings.aiPermissions.view) await refreshTree();
+    else { setTree([]); setGraph({ nodes: [], edges: [] }); }
+    flash("Profile selected.");
   }
 
   const crumbs = graphOpen ? [tx("Graph", "Graphe")] : selectedPath?.split("/") ?? (spacePath ? spacePath.split("/") : []);
@@ -597,8 +606,9 @@ export function App() {
         <button className="icon-button framed" onClick={() => openCreate("directory")} disabled={!activePermissions.create} title={tx("New folder", "Nouveau dossier")} aria-label={tx("New folder", "Nouveau dossier")}><Icons.folder /></button>
       </div>
       <div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Filter pages…", "Filtrer les pages…")} aria-label={tx("Filter pages", "Filtrer les pages")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
-      <button className={`home-link ${!selectedPath && !spacePath && !graphOpen ? "active" : ""}`} onClick={() => setSearchParams({})}><Icons.book />{tx("Overview", "Vue d’ensemble")}</button>
-      <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => setSearchParams({ view: "graph" })}><Icons.graph />{tx("Graph", "Graphe")}</button>
+      <button className={`home-link ${!selectedPath && !spacePath && !graphOpen && !docsOpen ? "active" : ""}`} onClick={() => setSearchParams({})}><Icons.book />Profiles</button>
+      <button className={`home-link ${docsOpen ? "active" : ""}`} onClick={() => setSearchParams({ view: "docs" })} disabled={!applicationSettings.activeProfileId}><Icons.file />Documentation</button>
+      <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => setSearchParams({ view: "graph" })} disabled={!applicationSettings.activeProfileId}><Icons.graph />{tx("Graph", "Graphe")}</button>
       <div className="sidebar-label"><span>{tx("SPACE", "ESPACE")}</span><span>{tree.length}</span></div>
       <nav className={rootDrop ? "root-drop" : ""} data-drop-label={tx("Move to root", "Déplacer à la racine")} aria-label={tx("Documentation tree", "Arborescence documentaire")} onDragOver={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setRootDrop(true); } }} onDragLeave={() => setRootDrop(false)} onDrop={dropAtRoot}>
         {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={visibleTree} selectedPath={selectedPath} permissions={activePermissions} onSelect={(path) => void select(path)} onAction={openAction} onMove={(node, folder) => void moveNode(node, folder)} />}
@@ -614,7 +624,7 @@ export function App() {
         </div>
       </header>
 
-      {graphOpen ? <KnowledgeGraph graph={graph} pageTypes={pageTypes} onOpen={openGraphNode} /> : selectedPath ? <>
+      {!applicationSettings.activeProfileId || (!selectedPath && !spacePath && !graphOpen && !docsOpen) ? <ProfilePage settings={applicationSettings} onSave={saveProfile} onActivate={activateProfile} onOpenDocs={() => setSearchParams({ view: "docs" })} /> : graphOpen ? <KnowledgeGraph graph={graph} pageTypes={pageTypes} onOpen={openGraphNode} /> : selectedPath ? <>
         <div className="editor-toolbar">
           <div className="toolbar-left">
           <div className="mode-switch"><button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Icons.eye />{tx("Preview", "Aperçu")}</button><button className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")} disabled={!canEditDocument}><Icons.edit />{tx("Edit", "Modifier")}</button></div>
@@ -651,7 +661,7 @@ export function App() {
           {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
           <div className="backlinks"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>Reference · {node.path}</small></button>)}</div>}</div>
         </>}
-      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} profile={applicationSettings.profile} aiPermissions={applicationSettings.aiPermissions} proposals={proposals} onManageProfile={openStoragePicker} onAcceptProposal={(id, content) => void acceptProposal(id, content)} onRejectProposal={(id) => void rejectProposal(id)} onStatusChange={(id, status) => void setProposalStatus(id, status)} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
+      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} proposals={proposals} onAcceptProposal={(id, content) => void acceptProposal(id, content)} onRejectProposal={(id) => void rejectProposal(id)} onStatusChange={(id, status) => void setProposalStatus(id, status)} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
     </section>
 
     {notice && <div className={`toast ${notice.tone}`}><span>{notice.tone === "success" ? <Icons.check /> : "!"}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Close"><Icons.x /></button></div>}
@@ -660,16 +670,6 @@ export function App() {
       <form className="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void configureSettings(); }}>
         <header className="settings-drawer-header"><div><h2 id="settings-title">Settings</h2><p>Customize how Mnemosys works.</p></div><button className="icon-button" type="button" aria-label="Close settings" onClick={() => setStorageOpen(false)} disabled={storageBusy}><Icons.x /></button></header>
         <div className="settings-drawer-body">
-          <div className="settings-section-heading"><span><Icons.file /></span><div><strong>Active profile</strong><small>The profile automatically becomes the owner of new pages.</small></div></div>
-          <div className="profile-settings">
-            <label><input type="radio" name="profile-type" checked={draftProfile.type === "human"} disabled={applicationSettings.profile.type === "ai"} onChange={() => setDraftProfile((profile) => ({ ...profile, type: "human" }))} /><span><strong>Human</strong><small>Full access and permission administration.</small></span></label>
-            <label><input type="radio" name="profile-type" checked={draftProfile.type === "ai"} disabled={applicationSettings.profile.type === "ai"} onChange={() => setDraftProfile((profile) => ({ ...profile, type: "ai" }))} /><span><strong>AI</strong><small>Access is limited by the permissions below.</small></span></label>
-            {applicationSettings.profile.type === "ai" && <small className="settings-error">An AI profile cannot promote itself to Human.</small>}
-          </div>
-          <div className="profile-name-fields"><label className="field"><span>First name</span><input value={draftProfile.firstName} onChange={(event) => setDraftProfile((profile) => ({ ...profile, firstName: event.target.value }))} maxLength={100} /></label><label className="field"><span>Last name</span><input value={draftProfile.lastName} onChange={(event) => setDraftProfile((profile) => ({ ...profile, lastName: event.target.value }))} maxLength={100} /></label></div>
-          <label className="field"><span>Team</span><input value={draftProfile.team} onChange={(event) => setDraftProfile((profile) => ({ ...profile, team: event.target.value }))} maxLength={100} placeholder="e.g. Robotics" /></label>
-          <div className="settings-section-heading"><span><Icons.settings /></span><div><strong>AI permissions</strong><small>Only a human profile can change these access rights.</small></div></div>
-          <div className="permission-settings">{([['view', 'View'], ['create', 'Create'], ['edit', 'Edit'], ['delete', 'Delete']] as const).map(([key, label]) => <label key={key}><input type="checkbox" checked={draftPermissions[key]} disabled={applicationSettings.profile.type !== "human"} onChange={(event) => setDraftPermissions((permissions) => ({ ...permissions, [key]: event.target.checked }))} /><span>{label}</span></label>)}</div>
           <div className="settings-section-heading"><span><Icons.folder /></span><div><strong>Document storage</strong><small>Choose the folder that will contain Mnemosys-Vault.</small></div>{storage?.configured && <b>Configured</b>}</div>
           <div className="folder-browser">
             <div className="folder-browser-current"><button type="button" onClick={() => directoryListing?.parent && void browseStorage(directoryListing.parent)} disabled={!directoryListing?.parent || directoryBusy} title="Parent folder">←</button><span><small>Selected folder</small><strong title={directoryListing?.path}>{directoryListing?.path ?? "Loading…"}</strong></span></div>
@@ -703,7 +703,7 @@ function FolderField({ folders, value, onChange }: { folders: Node[]; value: str
   return <label className="field"><span>Location</span><select value={value} onChange={(event) => onChange(event.target.value)}><option value="">Main space</option>{folders.map((folder) => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>;
 }
 
-function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, profile, aiPermissions, proposals, onManageProfile, onAcceptProposal, onRejectProposal, onStatusChange, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
+function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, proposals, onAcceptProposal, onRejectProposal, onStatusChange, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
   nodes: Node[];
   results: SearchResult[];
   query: string;
@@ -712,10 +712,7 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
   searchError: string;
   space: Node | null;
   canCreate: boolean;
-  profile: ProfileSettings;
-  aiPermissions: Permissions;
   proposals: DocumentProposal[];
-  onManageProfile: () => void;
   onAcceptProposal: (id: string, content?: string) => void;
   onRejectProposal: (id: string) => void;
   onStatusChange: (id: string, status: ProposalStatus) => void;
@@ -727,32 +724,14 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
   onCreateFolder: () => void;
 }) {
   const tx = (english: string, _french: string) => english;
-  const profileName = [profile.firstName, profile.lastName].filter(Boolean).join(" ") || (profile.type === "human" ? "Human profile" : "AI profile");
-  const aiAccess = (["view", "create", "edit", "delete"] as const).filter((permission) => aiPermissions[permission]);
   return <div className="dashboard">
     <div className="dashboard-heading">
       <span className="eyebrow">{tx("KNOWLEDGE BASE", "BASE DE CONNAISSANCES")}</span>
       <h1>{space ? space.name : tx("Hello, what are you looking for?", "Bonjour, que cherchez-vous ?")}</h1>
       <p>{space ? `${documents(space.children ?? []).length} ${tx("document(s) in this space", "document(s) dans cet espace")}` : tx("Browse your team spaces or search the documentation directly.", "Parcourez les espaces de votre équipe ou recherchez directement une documentation.")}</p>
       <div className="home-search"><span>⌕</span><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder={tx("Search titles and Markdown content…", "Rechercher dans les titres et le contenu Markdown…")} />{searchLoading && <i className="saving-spinner" />}{query && <button onClick={() => onQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
-      <div className="search-mode-toggle" aria-label="Search mode"><button className={searchMode === "lexical" ? "active" : ""} onClick={() => onSearchMode("lexical")}><strong>Lexical</strong><span>Exact words and metadata</span></button><button className={searchMode === "hybrid" ? "active" : ""} onClick={() => onSearchMode("hybrid")}><strong>Hybrid</strong><span>Lexical + semantic context</span></button></div>
+      <div className="search-mode-toggle" aria-label="Search mode"><button className={searchMode === "names" ? "active" : ""} onClick={() => onSearchMode("names")}><strong>Names</strong><span>File and folder names</span></button><button className={searchMode === "lexical" ? "active" : ""} onClick={() => onSearchMode("lexical")}><strong>Metadata</strong><span>Exact terms across metadata and content</span></button><button className={searchMode === "hybrid" ? "active" : ""} onClick={() => onSearchMode("hybrid")}><strong>Semantic</strong><span>Lexical + semantic context</span></button></div>
     </div>
-
-    {!space && !query && <section className="profile-overview" aria-label="Profile and access">
-      <div className="section-title"><h2>Profile and access</h2></div>
-      <div className="profile-overview-grid">
-        <article className="profile-overview-card">
-          <div className="profile-avatar">{profileName.slice(0, 1).toUpperCase()}</div>
-          <div><span className="profile-kind">{profile.type === "human" ? "HUMAN PROFILE" : "AI PROFILE"}</span><h2>{profileName}</h2><p>{profile.team || "No team assigned"}</p></div>
-          <button className="button secondary" onClick={onManageProfile}>Manage profile</button>
-        </article>
-        <article className="profile-overview-card access-card">
-          <div><span className="profile-kind">YOUR ACCESS</span><h2>{profile.type === "human" ? "Full access" : aiAccess.length ? aiAccess.map((permission) => permission[0].toUpperCase() + permission.slice(1)).join(", ") : "No access"}</h2><p>{profile.type === "human" ? "Human profiles can manage AI access." : "Your access is controlled by a human profile."}</p></div>
-          <div className="ai-access-summary"><span>AI access</span><div>{(["view", "create", "edit", "delete"] as const).map((permission) => <b key={permission} className={aiPermissions[permission] ? "enabled" : ""}>{permission}</b>)}</div></div>
-          {profile.type === "human" && <button className="button secondary" onClick={onManageProfile}>Manage AI rights</button>}
-        </article>
-      </div>
-    </section>}
 
     {!space && !query && proposals.length > 0 && <section className="proposal-inbox" aria-label="AI proposals">
       <div className="section-title"><h2>AI proposals</h2><span>{proposals.length}</span></div>
@@ -761,7 +740,7 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
 
     {query ? <section className="search-results">
       <div className="section-title"><h2>{tx("Results", "Résultats")}</h2><span>{results.length}</span></div>
-      {searchError ? <div className="no-results"><span>!</span><strong>Search unavailable</strong><p>{searchError}</p></div> : results.length ? <div className="result-list">{results.map((result) => <button key={result.path} onClick={() => result.type === "directory" ? onOpenFolder(result.path) : onOpenDocument(result.path)}><span className="result-icon">{result.type === "directory" ? <Icons.folder /> : <Icons.file />}</span><span><strong>{result.title || result.name.replace(/\.md$/, "")}</strong><small>{result.path}</small>{result.snippet && <p>{result.snippet}</p>}<i>{result.matchTypes.map((matchType) => <em key={matchType} className={matchType}>{matchType}</em>)}</i></span><b>→</b></button>)}</div> : !searchLoading && <div className="no-results"><span>⌕</span><strong>{tx("No pages or folders found", "Aucune page ou dossier trouvé")}</strong><p>{tx("Try another search term or Hybrid mode.", "Essayez un autre terme ou le mode hybride.")}</p></div>}
+      {searchError ? <div className="no-results"><span>!</span><strong>Search unavailable</strong><p>{searchError}</p></div> : results.length ? <div className="result-list">{results.map((result) => <button key={result.path} onClick={() => result.type === "directory" ? onOpenFolder(result.path) : onOpenDocument(result.path)}><span className="result-icon">{result.type === "directory" ? <Icons.folder /> : <Icons.file />}</span><span><strong>{result.title || result.name.replace(/\.md$/, "")}</strong><small>{result.path}</small>{result.snippet && <p>{result.snippet}</p>}<i>{result.matchTypes.map((matchType) => <em key={matchType} className={matchType}>{matchType}</em>)}</i></span><b>→</b></button>)}</div> : !searchLoading && <div className="no-results"><span>⌕</span><strong>{tx("No pages or folders found", "Aucune page ou dossier trouvé")}</strong><p>{tx("Try another search term or Semantic mode.", "Essayez un autre terme ou le mode sémantique.")}</p></div>}
     </section> : <>
       <div className="section-title"><h2>{space ? tx("Content", "Contenu") : tx("Your documentation", "Vos documentations")}</h2><span>{nodes.length}</span></div>
       {nodes.length ? <div className="space-grid">{nodes.map((node) => {
@@ -787,4 +766,69 @@ function ProposalCard({ proposal, onAccept, onReject, onStatusChange }: { propos
     <pre className="proposal-diff">{proposal.diff}</pre>
     {!final && <><label className="proposal-status-control">Status<select value={proposal.status} onChange={(event) => onStatusChange(proposal.id, event.target.value as ProposalStatus)}><option value="draft">Draft</option><option value="in_review">In review</option><option value="needs_human_input">Needs human input</option><option value="approved">Approved</option></select></label>{editing && <textarea className="proposal-editor" value={content} onChange={(event) => setContent(event.target.value)} aria-label={`Edit proposal for ${proposal.path}`} />}<div className="proposal-actions"><button className="button secondary" onClick={() => setEditing((open) => !open)}>{editing ? "Hide editor" : "Modify"}</button><button className="button primary" onClick={() => onAccept(proposal.id, editing ? content : undefined)}>Merge proposal</button><button className="button ghost" onClick={() => onReject(proposal.id)}>Reject</button></div></>}
   </article>;
+}
+
+function ProfilePage({ settings, onSave, onActivate, onOpenDocs }: {
+  settings: ApplicationSettings;
+  onSave: (id: string | null, profile: ProfileSettings, permissions: Permissions) => Promise<void>;
+  onActivate: (id: string) => Promise<void>;
+  onOpenDocs: () => void;
+}) {
+  const blank = (): ProfileSettings => ({ type: "human", firstName: "", lastName: "", name: "", team: "" });
+  const emptyRights = (): Permissions => ({ view: true, create: false, edit: false, delete: false });
+  const [editing, setEditing] = useState<string | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [profile, setProfile] = useState<ProfileSettings>(blank);
+  const [rights, setRights] = useState<Permissions>(emptyRights);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const canManage = !settings.activeProfileId || settings.profile.type === "human";
+  const title = (entry: SavedProfile) => entry.type === "ai" ? entry.name || "AI" : `${entry.firstName} ${entry.lastName}`.trim();
+
+  function start(entry?: SavedProfile) {
+    setEditing(entry?.id ?? null);
+    setProfile(entry ? { type: entry.type, firstName: entry.firstName, lastName: entry.lastName, name: entry.name || "", team: entry.team } : blank());
+    setRights(entry?.permissions ?? emptyRights());
+    setError("");
+    setFormOpen(true);
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await onSave(editing, profile, rights);
+      setFormOpen(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save profile."); }
+    finally { setBusy(false); }
+  }
+
+  async function select(id: string) {
+    setError("");
+    try { await onActivate(id); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not select profile."); }
+  }
+
+  return <div className="profile-page">
+    <div className="profile-page-heading"><div><span className="profile-kind">MNEMOSYS</span><h1>Profiles</h1><p>Create human and AI profiles, then set each AI profile's access.</p></div>{canManage && settings.profiles.length > 0 && <button className="button primary" onClick={() => start()}><Icons.plus />Add profile</button>}</div>
+    {settings.profiles.length ? <div className="profile-list">{settings.profiles.map((entry) => <article className="profile-list-card" key={entry.id}>
+      <div className="profile-avatar">{title(entry).slice(0, 1).toUpperCase()}</div>
+      <div className="profile-list-copy"><span className="profile-kind">{entry.type === "ai" ? "AI" : "HUMAN"}{entry.id === settings.activeProfileId ? " · ACTIVE" : ""}</span><h2>{title(entry)}</h2><p>{entry.team || "No team"}</p>{entry.type === "ai" && <div className="profile-rights">{(["view", "create", "edit", "delete"] as const).map((right) => <span className={entry.permissions[right] ? "granted" : ""} key={right}>{right}</span>)}</div>}</div>
+      <div className="profile-list-actions">{canManage && <button className="button secondary" onClick={() => start(entry)}>Edit</button>}{entry.type === "human" && entry.id !== settings.activeProfileId && settings.profile.type !== "ai" && <button className="button secondary" onClick={() => void select(entry.id)}>Use profile</button>}</div>
+    </article>)}</div> : <div className="profile-empty"><h2>No profiles yet</h2><p>Add a human profile to start using the vault. You can also add AI profiles and set their rights here.</p><button className="button primary" onClick={() => start()}><Icons.plus />Add profile</button></div>}
+    {!formOpen && error && <p className="settings-error" role="alert">{error}</p>}
+    {!settings.activeProfileId && settings.profiles.length > 0 && <p className="profile-note">Add a human profile to start using documentation.</p>}
+    {settings.activeProfileId && <button className="button secondary profile-docs-link" onClick={onOpenDocs}>Open documentation →</button>}
+    {formOpen && <div className="profile-form-backdrop" onMouseDown={() => !busy && setFormOpen(false)}><form className="profile-form" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => void submit(event)} aria-label={editing ? "Edit profile" : "Add profile"}>
+      <div className="profile-form-heading"><h2>{editing ? "Edit profile" : "Add profile"}</h2><button type="button" className="icon-button" onClick={() => setFormOpen(false)} aria-label="Close" disabled={busy}><Icons.x /></button></div>
+      {!editing && <div className="profile-type-options"><label><input type="radio" name="new-profile-type" checked={profile.type === "human"} onChange={() => setProfile({ ...blank(), type: "human" })} />Human</label><label><input type="radio" name="new-profile-type" checked={profile.type === "ai"} onChange={() => setProfile({ ...blank(), type: "ai" })} />AI</label></div>}
+      {profile.type === "human" ? <div className="profile-name-fields"><label className="field"><span>First name</span><input required maxLength={100} value={profile.firstName} onChange={(event) => setProfile({ ...profile, firstName: event.target.value })} /></label><label className="field"><span>Last name</span><input required maxLength={100} value={profile.lastName} onChange={(event) => setProfile({ ...profile, lastName: event.target.value })} /></label></div> : <label className="field"><span>AI name</span><input required maxLength={100} value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label>}
+      <label className="field"><span>Team</span><input maxLength={100} value={profile.team} onChange={(event) => setProfile({ ...profile, team: event.target.value })} /></label>
+      {profile.type === "human" && <p className="profile-note">Human profiles have full access.</p>}
+      {profile.type === "ai" && <><h3>AI access</h3><div className="permission-settings">{(["view", "create", "edit", "delete"] as const).map((right) => <label key={right}><input type="checkbox" checked={rights[right]} onChange={(event) => setRights(right === "view" && !event.target.checked ? { view: false, create: false, edit: false, delete: false } : { ...rights, [right]: event.target.checked, view: right === "view" ? event.target.checked : true })} /><span>{right[0].toUpperCase() + right.slice(1)}</span></label>)}</div></>}
+      {error && <p className="settings-error" role="alert">{error}</p>}
+      <div className="profile-form-actions"><button type="button" className="button secondary" onClick={() => setFormOpen(false)} disabled={busy}>Cancel</button><button className="button primary" type="submit" disabled={busy}>{busy ? "Saving…" : editing ? "Save profile" : "Add profile"}</button></div>
+    </form></div>}
+  </div>;
 }

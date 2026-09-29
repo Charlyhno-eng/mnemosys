@@ -18,9 +18,10 @@ export type Node = {
 export type PageType = string;
 export type ProfileType = "human" | "ai";
 export type PageTypeDefinition = { id: PageType; label: string; description: string; color: string; builtIn: boolean };
-export type ProfileSettings = { type: ProfileType; firstName: string; lastName: string; team: string };
+export type ProfileSettings = { type: ProfileType; firstName: string; lastName: string; name: string; team: string };
 export type Permissions = { view: boolean; create: boolean; edit: boolean; delete: boolean };
-export type ApplicationSettings = { pageTypes: PageTypeDefinition[]; profile: ProfileSettings; aiPermissions: Permissions };
+export type SavedProfile = ProfileSettings & { id: string; permissions: Permissions };
+export type ApplicationSettings = { pageTypes: PageTypeDefinition[]; profile: ProfileSettings; aiPermissions: Permissions; profiles: SavedProfile[]; activeProfileId: string };
 export type Document = { id: string; path: string; content: string; revision: string; pageType: PageType; owner: string; application: string; aiEditable: boolean; lastModifiedBy: ProfileType; aiTouched: boolean; updatedAt: string };
 export type ProposalStatus = "draft" | "in_review" | "needs_human_input" | "approved" | "rejected" | "merged";
 export type DocumentProposal = { id: string; path: string; originalContent: string; proposedContent: string; diff: string; status: ProposalStatus; createdAt: string };
@@ -29,8 +30,8 @@ export type DirectoryListing = { path: string; parent?: string; directories: Arr
 export type GraphNode = { id: string; documentId?: string; name: string; type: Node["type"]; pageType?: PageType };
 export type GraphEdge = { source: string; target: string; type: "hierarchy" | "link" };
 export type Graph = { nodes: GraphNode[]; edges: GraphEdge[] };
-export type SearchMode = "lexical" | "hybrid";
-export type SearchResult = { path: string; type: "directory" | "document"; name: string; title: string; pageType: PageType; snippet: string; score: number; matchTypes: Array<"lexical" | "semantic"> };
+export type SearchMode = "names" | "lexical" | "hybrid";
+export type SearchResult = { path: string; type: "directory" | "document"; name: string; title: string; pageType: PageType; snippet: string; score: number; matchTypes: Array<"name" | "lexical" | "semantic"> };
 export type SearchResponse = { query: string; mode: SearchMode; results: SearchResult[] };
 
 export class APIError extends Error {
@@ -78,6 +79,9 @@ export const api = {
   },
   storage: () => request<StorageSettings>("/api/settings/storage"),
   applicationSettings: () => request<ApplicationSettings>("/api/settings/application"),
+  createProfile: (profile: ProfileSettings, permissions: Permissions) => request<ApplicationSettings>("/api/profiles", { method: "POST", ...json({ profile, permissions }) }),
+  updateProfile: (id: string, profile: ProfileSettings, permissions: Permissions) => request<ApplicationSettings>(`/api/profiles/${encodeURIComponent(id)}`, { method: "PUT", ...json({ profile, permissions }) }),
+  activateProfile: (id: string) => request<ApplicationSettings>(`/api/profiles/${encodeURIComponent(id)}/activate`, { method: "PUT" }),
   proposals: () => request<DocumentProposal[]>("/api/documents/proposals"),
   acceptProposal: (id: string, content?: string) => request<void>(`/api/documents/proposals/${encodeURIComponent(id)}/accept`, { method: "POST", ...json(content === undefined ? {} : { content }) }),
   rejectProposal: (id: string) => request<void>(`/api/documents/proposals/${encodeURIComponent(id)}`, { method: "DELETE" }),
