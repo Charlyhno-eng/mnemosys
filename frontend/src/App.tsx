@@ -109,6 +109,7 @@ export function App() {
   const [pageTypeHelpOpen, setPageTypeHelpOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [rootDrop, setRootDrop] = useState(false);
   const [homeQuery, setHomeQuery] = useState("");
   const [homeSearchMode, setHomeSearchMode] = useState<SearchMode>("lexical");
@@ -297,6 +298,7 @@ export function App() {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); }
       if (activePermissions.create && !modal && !storageOpen && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") { event.preventDefault(); openCreate("document"); }
       if (storageOpen && event.key === "Escape" && !storageBusy) setStorageOpen(false);
+      if (mobileNavigationOpen && event.key === "Escape") setMobileNavigationOpen(false);
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
@@ -598,26 +600,28 @@ export function App() {
   const crumbs = graphOpen ? [tx("Graph", "Graphe")] : selectedPath?.split("/") ?? (spacePath ? spacePath.split("/") : []);
   const statusLabel = saveStatus === "saving" ? tx("Saving…", "Enregistrement…") : saveStatus === "proposed" ? tx("Proposal pending review", "Proposition en attente") : saveStatus === "conflict" ? "Concurrent edit" : saveStatus === "error" ? tx("Save error", "Erreur d’enregistrement") : dirty ? tx("Unsaved changes", "Modifications en attente") : tx("Saved", "Enregistré");
 
-  return <main className="app-shell">
-    <aside className="sidebar">
-      <button className="brand" onClick={() => setSearchParams({})}><span className="brand-mark"><img src="/mnemosys-logo.png?v=2" alt="" /></span><span><strong>Mnemosys</strong><span>{tx("Team memory", "Mémoire d’équipe")}</span></span></button>
+  return <main className={mobileNavigationOpen ? "app-shell mobile-navigation-open" : "app-shell"}>
+    {mobileNavigationOpen && <button className="mobile-nav-scrim" type="button" aria-label={tx("Close navigation", "Fermer la navigation")} onClick={() => setMobileNavigationOpen(false)} />}
+    <aside className="sidebar" id="primary-navigation">
+      <button className="brand" onClick={() => { setMobileNavigationOpen(false); setSearchParams({}); }}><span className="brand-mark"><img src="/mnemosys-logo.png?v=2" alt="" /></span><span><strong>Mnemosys</strong><span>{tx("Team memory", "Mémoire d’équipe")}</span></span></button>
       <div className="quick-actions">
         <button className="button primary grow" onClick={() => openCreate("document")} disabled={!activePermissions.create}><Icons.plus />{tx("New page", "Nouvelle page")}</button>
         <button className="icon-button framed" onClick={() => openCreate("directory")} disabled={!activePermissions.create} title={tx("New folder", "Nouveau dossier")} aria-label={tx("New folder", "Nouveau dossier")}><Icons.folder /></button>
       </div>
       <div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Filter pages…", "Filtrer les pages…")} aria-label={tx("Filter pages", "Filtrer les pages")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
-      <button className={`home-link ${!selectedPath && !spacePath && !graphOpen && !docsOpen ? "active" : ""}`} onClick={() => setSearchParams({})}><Icons.book />Profiles</button>
-      <button className={`home-link ${docsOpen ? "active" : ""}`} onClick={() => setSearchParams({ view: "docs" })} disabled={!applicationSettings.activeProfileId}><Icons.file />Documentation</button>
-      <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => setSearchParams({ view: "graph" })} disabled={!applicationSettings.activeProfileId}><Icons.graph />{tx("Graph", "Graphe")}</button>
+      <button className={`home-link ${!selectedPath && !spacePath && !graphOpen && !docsOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({}); }}><Icons.book />Profiles</button>
+      <button className={`home-link ${docsOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "docs" }); }} disabled={!applicationSettings.activeProfileId}><Icons.file />Documentation</button>
+      <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "graph" }); }} disabled={!applicationSettings.activeProfileId}><Icons.graph />{tx("Graph", "Graphe")}</button>
       <div className="sidebar-label"><span>{tx("SPACE", "ESPACE")}</span><span>{tree.length}</span></div>
       <nav className={rootDrop ? "root-drop" : ""} data-drop-label={tx("Move to root", "Déplacer à la racine")} aria-label={tx("Documentation tree", "Arborescence documentaire")} onDragOver={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setRootDrop(true); } }} onDragLeave={() => setRootDrop(false)} onDrop={dropAtRoot}>
-        {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={visibleTree} selectedPath={selectedPath} permissions={activePermissions} onSelect={(path) => void select(path)} onAction={openAction} onMove={(node, folder) => void moveNode(node, folder)} />}
+        {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={visibleTree} selectedPath={selectedPath} permissions={activePermissions} onSelect={(path) => { setMobileNavigationOpen(false); void select(path); }} onAction={(node, action) => { setMobileNavigationOpen(false); openAction(node, action); }} onMove={(node, folder) => void moveNode(node, folder)} />}
       </nav>
     </aside>
 
     <section className="workspace">
       <header className="topbar">
-        <div className="breadcrumbs"><button onClick={() => setSearchParams({})}>{tx("Home", "Accueil")}</button>{crumbs.map((part, index) => <span key={`${part}-${index}`}><b>/</b><span>{part.replace(/\.md$/, "")}</span></span>)}</div>
+        <button className="icon-button mobile-menu-button" type="button" aria-label={mobileNavigationOpen ? tx("Close navigation", "Fermer la navigation") : tx("Open navigation", "Ouvrir la navigation")} aria-expanded={mobileNavigationOpen} aria-controls="primary-navigation" onClick={() => setMobileNavigationOpen((open) => !open)}><Icons.menu /></button>
+        <div className="breadcrumbs"><button onClick={() => { setMobileNavigationOpen(false); setSearchParams({}); }}>{tx("Home", "Accueil")}</button>{crumbs.map((part, index) => <span key={`${part}-${index}`}><b>/</b><span>{part.replace(/\.md$/, "")}</span></span>)}</div>
         <div className="topbar-actions">
           {storage && !storage.configured && <button className="settings-reminder" onClick={openStoragePicker}><span>!</span>{tx("Choose your storage folder", "Pensez à choisir votre dossier d’enregistrement")}</button>}
           <button className={`icon-button settings-button ${storage && !storage.configured ? "needs-attention" : ""}`} onClick={openStoragePicker} title={tx("Settings", "Paramètres")} aria-label={tx("Open settings", "Ouvrir les paramètres")}><Icons.settings /></button>
