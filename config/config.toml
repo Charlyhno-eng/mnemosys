@@ -1,17 +1,17 @@
 # Mnemosys application configuration.
 
 [storage]
-path = ""
+path = "/home/charly/Téléchargements"
 
 [profiles]
 active_id = "legacy"
 
 [profiles.legacy]
 type = "human"
-first_name = ""
-last_name = ""
+first_name = "Charly"
+last_name = "Mercier"
 name = ""
-team = ""
+team = "Robotic"
 view = true
 create = true
 edit = true
@@ -21,8 +21,8 @@ delete = true
 type = "ai"
 first_name = ""
 last_name = ""
-name = ""
-team = ""
+name = "Agent 1"
+team = "Robotic"
 view = true
 create = false
 edit = true
