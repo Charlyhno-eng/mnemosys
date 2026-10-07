@@ -48,6 +48,8 @@ Open the app, add a human profile on the Profiles page, then choose a storage fo
 
 ## Native MCP for local agents
 
+For step-by-step guides with tested clients, see [Calling MCP from Python](docs/mcp-python.md) and [Calling MCP from TypeScript](docs/mcp-typescript.md). Both guides are in French and cover the same setup, initialization, tool discovery, read operations, proposal workflow, create/delete exercises, and error handling. The Python client uses the standard library; the TypeScript client runs directly on Node.js 24 without an MCP SDK.
+
 Start the API as described above, then configure your agent's MCP client with the Streamable HTTP URL `http://127.0.0.1:8080/mcp` (adjust the port if you change `-addr`). The endpoint implements protocol version `2025-06-18`, initialization, ping, tool discovery, and tool calls. It returns JSON responses and uses no sessions or persistent SSE stream; GET and DELETE return HTTP 405. No separate MCP process or dependency is required.
 
 The endpoint is intended for trusted agents on the same machine. It requires a loopback peer and a localhost/loopback Host, and rejects browser origins that differ from the API origin. It has no user authentication or remote-access configuration; do not expose it through a reverse proxy. Clients must send `Content-Type: application/json`, `Accept: application/json, text/event-stream`, and the negotiated `MCP-Protocol-Version: 2025-06-18` header after initialization. Request bodies are limited to 1 MiB.
