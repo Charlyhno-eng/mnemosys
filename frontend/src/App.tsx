@@ -75,19 +75,6 @@ function findNode(nodes: Node[], path: string | null): Node | null {
   return null;
 }
 
-function filterTree(nodes: Node[], query: string): Node[] {
-  const normalized = query.trim().toLocaleLowerCase();
-  if (!normalized) return nodes;
-  return nodes.flatMap((node) => {
-    if (node.type === "document") {
-      const metadata = [node.name, node.path, node.title, node.pageType, node.owner, node.application, node.lastModifiedBy, node.updatedAt].filter(Boolean).join(" ").toLocaleLowerCase();
-      return metadata.includes(normalized) ? [node] : [];
-    }
-    const children = filterTree(node.children ?? [], query);
-    return node.name.toLocaleLowerCase().includes(normalized) || children.length ? [{ ...node, children }] : [];
-  });
-}
-
 export function App() {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedPath = searchParams.get("doc");
@@ -110,7 +97,6 @@ export function App() {
   const [modalPageType, setModalPageType] = useState<PageType>("general");
   const [pageTypeHelpOpen, setPageTypeHelpOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [query, setQuery] = useState("");
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [rootDrop, setRootDrop] = useState(false);
   const [homeQuery, setHomeQuery] = useState("");
@@ -147,7 +133,6 @@ export function App() {
 
   const allFolders = useMemo(() => folders(tree), [tree]);
   const allEntries = useMemo(() => entries(tree), [tree]);
-  const visibleTree = useMemo(() => filterTree(tree, query), [tree, query]);
   const spaceNode = useMemo(() => findNode(tree, spacePath), [tree, spacePath]);
   const homeNodes = spaceNode?.type === "directory" ? spaceNode.children ?? [] : tree;
   const dirty = loadedPath === selectedPath && content !== savedContent;
@@ -671,14 +656,14 @@ export function App() {
         <button className="button primary grow" onClick={() => openCreate("document")} disabled={!activePermissions.create}><Icons.plus />{tx("New page", "Nouvelle page")}</button>
         <button className="icon-button framed" onClick={() => openCreate("directory")} disabled={!activePermissions.create} title={tx("New folder", "Nouveau dossier")} aria-label={tx("New folder", "Nouveau dossier")}><Icons.folder /></button>
       </div>
-      <div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Filter pages…", "Filtrer les pages…")} aria-label={tx("Filter pages", "Filtrer les pages")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
+      <hr className="sidebar-divider" />
       <button className={`home-link ${!selectedPath && !spacePath && !graphOpen && !docsOpen && !mergesOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({}); }}><Icons.book />Profiles</button>
-      <button className={`home-link ${docsOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "docs" }); }} disabled={!applicationSettings.activeProfileId}><Icons.file />Documentation</button>
-      <button className={`home-link merge-navigation ${mergesOpen ? "active" : ""}`} onClick={() => void openMergeHistory()} disabled={!applicationSettings.activeProfileId}><Icons.merge />Merge requests{proposals.some((proposal) => !isResolvedProposal(proposal)) && <span className="merge-nav-count">{proposals.filter((proposal) => !isResolvedProposal(proposal)).length}</span>}</button>
-      <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "graph" }); }} disabled={!applicationSettings.activeProfileId}><Icons.graph />{tx("Graph", "Graphe")}</button>
+      <button className={`home-link ${docsOpen || graphOpen || selectedPath || spacePath ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "docs" }); }} disabled={!applicationSettings.activeProfileId}><Icons.file />Documentation</button>
+      <button className={`home-link ${mergesOpen ? "active" : ""}`} onClick={() => void openMergeHistory()} disabled={!applicationSettings.activeProfileId}><Icons.merge />Merge requests{proposals.some((proposal) => !isResolvedProposal(proposal)) && <span className="merge-nav-count">{proposals.filter((proposal) => !isResolvedProposal(proposal)).length}</span>}</button>
+      <hr className="sidebar-divider" />
       <div className="sidebar-label"><span>{tx("SPACE", "ESPACE")}</span><span>{tree.length}</span></div>
       <nav className={rootDrop ? "root-drop" : ""} data-drop-label={tx("Move to root", "Déplacer à la racine")} aria-label={tx("Documentation tree", "Arborescence documentaire")} onDragOver={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setRootDrop(true); } }} onDragLeave={() => setRootDrop(false)} onDrop={dropAtRoot}>
-        {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={visibleTree} selectedPath={selectedPath} permissions={activePermissions} onSelect={(path) => { setMobileNavigationOpen(false); void select(path); }} onAction={(node, action) => { setMobileNavigationOpen(false); openAction(node, action); }} onMove={(node, folder) => void moveNode(node, folder)} />}
+        {loading ? <div className="tree-loading"><span /><span /><span /></div> : <DocumentTree nodes={tree} selectedPath={selectedPath} permissions={activePermissions} onSelect={(path) => { setMobileNavigationOpen(false); void select(path); }} onAction={(node, action) => { setMobileNavigationOpen(false); openAction(node, action); }} onMove={(node, folder) => void moveNode(node, folder)} />}
       </nav>
     </aside>
 
@@ -730,7 +715,7 @@ export function App() {
           {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} disabled={proposalBusy} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
           <div className="backlinks"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>Reference · {node.path}</small></button>)}</div>}</div>
         </div>}
-      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
+      </> : <Dashboard onOpenGraph={() => setSearchParams({ view: "graph" })} nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
     </section>
 
     {notice && <div className={`toast ${notice.tone}`}><span>{notice.tone === "success" ? <Icons.check /> : "!"}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Close"><Icons.x /></button></div>}
@@ -772,7 +757,7 @@ function FolderField({ folders, value, onChange }: { folders: Node[]; value: str
   return <label className="field"><span>Location</span><select value={value} onChange={(event) => onChange(event.target.value)}><option value="">Main space</option>{folders.map((folder) => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>;
 }
 
-function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
+function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder, onOpenGraph }: {
   nodes: Node[];
   results: SearchResult[];
   query: string;
@@ -787,6 +772,7 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
   onOpenFolder: (path: string) => void;
   onCreateDocument: () => void;
   onCreateFolder: () => void;
+  onOpenGraph: () => void;
 }) {
   const tx = (english: string, _french: string) => english;
   const searchPlaceholder = searchMode === "names" ? "Search file and folder names…" : searchMode === "lexical" ? "Search metadata or content (e.g. team: Robotic)…" : "Search titles and Markdown content…";
@@ -798,6 +784,12 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
       <div className="home-search"><span>⌕</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={searchPlaceholder} />{searchLoading && <i className="saving-spinner" />}{query && <button onClick={() => onQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
       <div className="search-mode-toggle" aria-label="Search mode"><button className={searchMode === "names" ? "active" : ""} onClick={() => onSearchMode("names")}><strong>Names</strong><span>File and folder names</span></button><button className={searchMode === "lexical" ? "active" : ""} onClick={() => onSearchMode("lexical")}><strong>Metadata</strong><span>Exact terms across metadata and content</span></button><button className={searchMode === "hybrid" ? "active" : ""} onClick={() => onSearchMode("hybrid")}><strong>Semantic</strong><span>Lexical + semantic context</span></button></div>
     </div>
+
+    <button className="documentation-graph-link" type="button" onClick={onOpenGraph}>
+      <span className="documentation-graph-icon"><Icons.graph /></span>
+      <span className="documentation-graph-copy"><strong>Knowledge graph</strong><small>Explore connections between your pages and spaces.</small></span>
+      <span className="documentation-graph-action">Open graph <Icons.chevron /></span>
+    </button>
 
     {query ? <section className="search-results">
       <div className="section-title"><h2>{tx("Results", "Résultats")}</h2><span>{results.length}</span></div>

@@ -41,14 +41,7 @@ svg { display: block; }
 .icon-button.framed { border: 1px solid #293b52; background: #101d2d; }
 .danger-ghost:hover { color: #ff8994; background: rgba(196, 61, 75, .13); }
 
-.search-box { display: flex; align-items: center; gap: 7px; margin: 0 12px 13px; padding: 0 10px; border: 1px solid #1d2e43; border-radius: 8px; background: #0b1726; transition: border-color .15s, box-shadow .15s; }
-.search-box:focus-within { border-color: #315f99; box-shadow: 0 0 0 3px rgba(53, 113, 192, .1); }
-.search-box > span { color: #60758e; font-size: 20px; transform: rotate(-18deg); }
-.search-box input { width: 100%; min-width: 0; height: 34px; border: 0; outline: 0; color: #d6e2ef; background: transparent; font-size: 12px; }
-.search-box input::placeholder { color: #586a80; }
-.search-box button { display: grid; width: 23px; height: 23px; padding: 0; place-items: center; border: 0; border-radius: 5px; color: #60758e; background: transparent; cursor: pointer; }
-.search-box button:hover { color: #d4e1ee; background: #17263a; }
-.search-box svg { width: 13px; }
+.sidebar-divider { flex-shrink: 0; height: 0; margin: 6px 16px 14px; border: 0; border-top: 1px solid rgba(111, 145, 180, .16); }
 .home-link { display: flex; height: 34px; align-items: center; gap: 9px; margin: 0 8px 10px; padding: 0 11px; border: 1px solid transparent; border-radius: 7px; color: #8295aa; background: transparent; font-size: 11px; cursor: pointer; }
 .home-link:hover { color: #d5e4f3; background: #111f31; }
 .home-link.active { border-color: rgba(76,139,224,.16); color: #d9e9fa; background: linear-gradient(90deg, rgba(42,102,180,.22), rgba(29,69,115,.1)); }
@@ -455,7 +448,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 /* AI collaboration: document review and read-only request activity. */
-.merge-navigation { margin-left: 20px; }
 .merge-nav-count { margin-left: auto; border-radius: 5px; padding: 2px 6px; color: #c5b9f5; background: #282744; font-size: 10px; }
 .document-body { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow-y: auto; }
 .document-body .preview-pane { flex: 0 0 auto; overflow: visible; }
@@ -532,4 +524,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .merge-history-details > summary { margin-left: 64px; }.merge-review-card > header { align-items: flex-start; flex-direction: column; }
   .page-merge-proposals summary { padding: 14px; gap: 10px; }.merge-review-list { padding: 0 10px 10px; }
   .merge-review-card > footer, .merge-review-card > header { padding: 14px; }.merge-filters { align-items: stretch; }.merge-search { flex-basis: 100%; }
+}
+
+/* Documentation entry point for the dedicated graph view. */
+.documentation-graph-link { display: flex; width: 100%; align-items: center; gap: 14px; margin-bottom: 28px; border: 1px solid rgba(94, 145, 207, .28); border-radius: 12px; padding: 18px; color: #cbdcf0; background: linear-gradient(110deg, rgba(37, 77, 126, .24), rgba(14, 30, 48, .6)); text-align: left; cursor: pointer; transition: border-color .15s, background .15s; }
+.documentation-graph-link:hover { border-color: #527daf; background: rgba(37, 77, 126, .3); }
+.documentation-graph-link:focus-visible { outline: 2px solid #82b8f5; outline-offset: 3px; }
+.documentation-graph-icon { display: grid; width: 42px; height: 42px; flex-shrink: 0; place-items: center; border: 1px solid rgba(104, 163, 229, .22); border-radius: 11px; color: #8dbdf3; background: rgba(57, 112, 178, .16); }
+.documentation-graph-icon svg { width: 22px; height: 22px; }
+.documentation-graph-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.documentation-graph-copy strong { font-size: 13px; font-weight: 650; }
+.documentation-graph-copy small { color: #8ea2ba; font-size: 11px; line-height: 1.5; }
+.documentation-graph-action { display: flex; align-items: center; gap: 6px; color: #9bc4f4; font-size: 11px; white-space: nowrap; }
+.documentation-graph-action svg { width: 15px; height: 15px; }
+@media (max-width: 600px) {
+  .documentation-graph-link { flex-wrap: wrap; gap: 12px; padding: 15px; }
+  .documentation-graph-action { margin-left: 54px; }
 }
