@@ -6,6 +6,7 @@ import { Icons } from "./components/Icons";
 import { KnowledgeGraph } from "./components/KnowledgeGraph";
 import { LinkPicker } from "./components/LinkPicker";
 import { MarkdownPreview } from "./components/MarkdownPreview";
+import { MergeHistory, PageMergeProposals, isResolvedProposal } from "./components/MergeProposals";
 import { APIError, api, type ApplicationSettings, type DirectoryListing, type Document, type DocumentProposal, type Graph, type GraphNode, type Node, type PageType, type PageTypeDefinition, type Permissions, type ProfileSettings, type SavedProfile, type ProposalStatus, type SearchMode, type SearchResult, type StorageSettings } from "./lib/api";
 
 type Modal =
@@ -93,6 +94,7 @@ export function App() {
   const spacePath = searchParams.get("space");
   const graphOpen = searchParams.get("view") === "graph";
   const docsOpen = searchParams.get("view") === "docs";
+  const mergesOpen = searchParams.get("view") === "merges";
   const [tree, setTree] = useState<Node[]>([]);
   const [graph, setGraph] = useState<Graph>({ nodes: [], edges: [] });
   const [content, setContent] = useState("");
@@ -126,6 +128,12 @@ export function App() {
   const [directoryListing, setDirectoryListing] = useState<DirectoryListing | null>(null);
   const [directoryBusy, setDirectoryBusy] = useState(false);
   const [proposals, setProposals] = useState<DocumentProposal[]>([]);
+  const [proposalsLoading, setProposalsLoading] = useState(true);
+  const [proposalsError, setProposalsError] = useState("");
+  const [proposalBusy, setProposalBusy] = useState(false);
+  const proposalBusyRef = useRef(false);
+  const currentPathRef = useRef(selectedPath);
+  currentPathRef.current = selectedPath;
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [revision, setRevision] = useState("");
@@ -145,7 +153,7 @@ export function App() {
   const dirty = loadedPath === selectedPath && content !== savedContent;
   const aiEditable = documentProperty(content, "ai_editable", "false") === "true";
   const activePermissions = !applicationSettings.activeProfileId ? { view: false, create: false, edit: false, delete: false } : applicationSettings.profile.type === "human" ? { view: true, create: true, edit: true, delete: true } : applicationSettings.aiPermissions;
-  const canEditDocument = activePermissions.edit && (applicationSettings.profile.type === "human" || aiEditable);
+  const canEditDocument = !proposalBusy && activePermissions.edit && (applicationSettings.profile.type === "human" || aiEditable);
   const backlinks = useMemo(() => selectedPath ? graph.edges.flatMap((edge) => {
     if (edge.type === "hierarchy" || edge.target !== selectedPath) return [];
     const node = allEntries.find((entry) => entry.path === edge.source);
@@ -159,7 +167,13 @@ export function App() {
     setGraph(nextGraph);
   }, []);
   const refreshProposals = useCallback(async () => {
-    setProposals(await api.proposals());
+    try {
+      setProposals(await api.proposals());
+      setProposalsError("");
+    } catch (error) {
+      setProposalsError(error instanceof Error ? error.message : "Merge requests are unavailable.");
+      throw error;
+    } finally { setProposalsLoading(false); }
   }, []);
 
   useEffect(() => {
@@ -169,11 +183,33 @@ export function App() {
       setApplicationSettings(appSettings);
       if (appSettings.activeProfileId && (appSettings.profile.type === "human" || appSettings.aiPermissions.view)) {
         void refreshTree().catch((error) => flash(error.message, "error")).finally(() => setLoading(false));
-        api.proposals().then(setProposals).catch(() => setProposals([]));
       } else setLoading(false);
       document.documentElement.lang = "en";
     }).catch((error) => flash(error instanceof Error ? error.message : "Settings are unavailable.", "error"));
   }, [flash, refreshTree]);
+  useEffect(() => {
+    if (!applicationSettings.activeProfileId || !activePermissions.view) {
+      setProposals([]);
+      setProposalsLoading(false);
+      return;
+    }
+    let active = true;
+    let timer: number;
+    setProposalsLoading(true);
+    const poll = async () => {
+      try {
+        const result = await api.proposals();
+        if (active) { setProposals(result); setProposalsError(""); }
+      } catch (error) {
+        if (active) setProposalsError(error instanceof Error ? error.message : "Merge requests are unavailable.");
+      } finally {
+        if (active) { setProposalsLoading(false); timer = window.setTimeout(poll, 5000); }
+      }
+    };
+    void poll();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [applicationSettings.activeProfileId, activePermissions.view]);
+
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 3500);
@@ -223,7 +259,7 @@ export function App() {
   }, [selectedPath, applicationSettings.activeProfileId, activePermissions.view, flash]);
 
   const save = useCallback(async (path = selectedPath, value = content, baseRevision = revision) => {
-    if (!path || loadedPath !== path || !baseRevision || saveInFlightRef.current) return false;
+    if (!path || loadedPath !== path || !baseRevision || saveInFlightRef.current || proposalBusyRef.current) return false;
     saveInFlightRef.current = true;
     setSaveStatus("saving");
     try {
@@ -245,7 +281,7 @@ export function App() {
       setEditConflict(null);
       if (result.proposal) {
         setSaveStatus("proposed");
-        void refreshProposals().catch(() => undefined);
+        void refreshProposals().catch((error) => flash(error.message, "error"));
         flash("AI change submitted as a proposal.");
       } else {
         setSaveStatus("saved");
@@ -268,10 +304,10 @@ export function App() {
   }, [content, flash, loadedPath, refreshProposals, refreshTree, revision, selectedPath, tx]);
 
   useEffect(() => {
-    if (!dirty || !selectedPath || editConflict || saveStatus === "saving") return;
+    if (!dirty || !selectedPath || editConflict || saveStatus === "saving" || proposalBusy) return;
     const timer = window.setTimeout(() => void save(selectedPath, content), 800);
     return () => window.clearTimeout(timer);
-  }, [content, dirty, editConflict, save, saveStatus, selectedPath]);
+  }, [content, dirty, editConflict, proposalBusy, save, saveStatus, selectedPath]);
 
   function loadConcurrentVersion() {
     if (!editConflict) return;
@@ -308,6 +344,12 @@ export function App() {
     if (path === selectedPath) return;
     if (dirty && selectedPath && !(await save(selectedPath, content))) return;
     setSearchParams({ doc: path });
+  }
+
+  async function openMergeHistory() {
+    if (dirty && selectedPath && !(await save(selectedPath, content))) return;
+    setMobileNavigationOpen(false);
+    setSearchParams({ view: "merges" });
   }
 
   function openCreate(type: Node["type"], parent = selectedPath ? parentPath(selectedPath) : spacePath ?? "") {
@@ -541,28 +583,49 @@ export function App() {
     finally { setStorageBusy(false); }
   }
 
-  async function acceptProposal(id: string, content?: string) {
+  async function reviewProposal(action: () => Promise<void>, message: string) {
+    if (proposalBusyRef.current) return;
+    proposalBusyRef.current = true;
+    setProposalBusy(true);
     try {
-      await api.acceptProposal(id, content);
-      await Promise.all([refreshProposals(), refreshTree()]);
-      flash("AI proposal accepted.");
-    } catch (error) { flash(error instanceof Error ? error.message : "Unable to accept proposal.", "error"); }
+      await action();
+      await refreshProposals();
+      flash(message);
+    } catch (error) { flash(error instanceof Error ? error.message : "Unable to review proposal.", "error"); }
+    finally { proposalBusyRef.current = false; setProposalBusy(false); }
+  }
+
+  async function acceptProposal(id: string, editedContent?: string) {
+    if (dirty || saveInFlightRef.current || editConflict) return;
+    const path = selectedPath;
+    const previousContent = historyRef.current.present;
+    await reviewProposal(async () => {
+      await api.acceptProposal(id, editedContent);
+      if (path) {
+        const document = await api.get(path);
+        if (currentPathRef.current === path) {
+          if (historyRef.current.present === previousContent) {
+            resetHistory(document.content);
+            setSavedContent(document.content);
+            setRevision(document.revision);
+            setEditConflict(null);
+            setSaveStatus("saved");
+          } else {
+            setEditConflict(document);
+            setSaveStatus("conflict");
+          }
+        }
+      }
+      await refreshTree();
+    }, "AI proposal merged into this page.");
   }
 
   async function rejectProposal(id: string) {
-    try {
-      await api.rejectProposal(id);
-      await refreshProposals();
-      flash("AI proposal rejected.");
-    } catch (error) { flash(error instanceof Error ? error.message : "Unable to reject proposal.", "error"); }
+    await reviewProposal(() => api.rejectProposal(id), "AI proposal rejected.");
   }
 
   async function setProposalStatus(id: string, status: ProposalStatus) {
-    try {
-      await api.setProposalStatus(id, status);
-      await refreshProposals();
-      flash(`AI proposal marked ${status.replace(/_/g, " ")}.`);
-    } catch (error) { flash(error instanceof Error ? error.message : "Unable to update proposal status.", "error"); }
+    await reviewProposal(() => api.setProposalStatus(id, status), `AI proposal marked ${status.replace(/_/g, " ")}.`);
   }
 
   async function browseStorage(path?: string) {
@@ -597,7 +660,7 @@ export function App() {
     flash("Profile selected.");
   }
 
-  const crumbs = graphOpen ? [tx("Graph", "Graphe")] : selectedPath?.split("/") ?? (spacePath ? spacePath.split("/") : []);
+  const crumbs = mergesOpen ? ["Merge requests"] : graphOpen ? [tx("Graph", "Graphe")] : selectedPath?.split("/") ?? (spacePath ? spacePath.split("/") : []);
   const statusLabel = saveStatus === "saving" ? tx("Saving…", "Enregistrement…") : saveStatus === "proposed" ? tx("Proposal pending review", "Proposition en attente") : saveStatus === "conflict" ? "Concurrent edit" : saveStatus === "error" ? tx("Save error", "Erreur d’enregistrement") : dirty ? tx("Unsaved changes", "Modifications en attente") : tx("Saved", "Enregistré");
 
   return <main className={mobileNavigationOpen ? "app-shell mobile-navigation-open" : "app-shell"}>
@@ -609,8 +672,9 @@ export function App() {
         <button className="icon-button framed" onClick={() => openCreate("directory")} disabled={!activePermissions.create} title={tx("New folder", "Nouveau dossier")} aria-label={tx("New folder", "Nouveau dossier")}><Icons.folder /></button>
       </div>
       <div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Filter pages…", "Filtrer les pages…")} aria-label={tx("Filter pages", "Filtrer les pages")} />{query && <button onClick={() => setQuery("")} aria-label={tx("Clear", "Effacer")}><Icons.x /></button>}</div>
-      <button className={`home-link ${!selectedPath && !spacePath && !graphOpen && !docsOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({}); }}><Icons.book />Profiles</button>
+      <button className={`home-link ${!selectedPath && !spacePath && !graphOpen && !docsOpen && !mergesOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({}); }}><Icons.book />Profiles</button>
       <button className={`home-link ${docsOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "docs" }); }} disabled={!applicationSettings.activeProfileId}><Icons.file />Documentation</button>
+      <button className={`home-link merge-navigation ${mergesOpen ? "active" : ""}`} onClick={() => void openMergeHistory()} disabled={!applicationSettings.activeProfileId}><Icons.merge />Merge requests{proposals.some((proposal) => !isResolvedProposal(proposal)) && <span className="merge-nav-count">{proposals.filter((proposal) => !isResolvedProposal(proposal)).length}</span>}</button>
       <button className={`home-link ${graphOpen ? "active" : ""}`} onClick={() => { setMobileNavigationOpen(false); setSearchParams({ view: "graph" }); }} disabled={!applicationSettings.activeProfileId}><Icons.graph />{tx("Graph", "Graphe")}</button>
       <div className="sidebar-label"><span>{tx("SPACE", "ESPACE")}</span><span>{tree.length}</span></div>
       <nav className={rootDrop ? "root-drop" : ""} data-drop-label={tx("Move to root", "Déplacer à la racine")} aria-label={tx("Documentation tree", "Arborescence documentaire")} onDragOver={(event) => { if (event.target === event.currentTarget) { event.preventDefault(); setRootDrop(true); } }} onDragLeave={() => setRootDrop(false)} onDrop={dropAtRoot}>
@@ -628,7 +692,7 @@ export function App() {
         </div>
       </header>
 
-      {!applicationSettings.activeProfileId || (!selectedPath && !spacePath && !graphOpen && !docsOpen) ? <ProfilePage settings={applicationSettings} onSave={saveProfile} onActivate={activateProfile} onOpenDocs={() => setSearchParams({ view: "docs" })} /> : graphOpen ? <KnowledgeGraph graph={graph} pageTypes={pageTypes} onOpen={openGraphNode} /> : selectedPath ? <>
+      {!applicationSettings.activeProfileId || (!selectedPath && !spacePath && !graphOpen && !docsOpen && !mergesOpen) ? <ProfilePage settings={applicationSettings} onSave={saveProfile} onActivate={activateProfile} onOpenDocs={() => setSearchParams({ view: "docs" })} /> : mergesOpen ? <MergeHistory proposals={proposals} loading={proposalsLoading} error={proposalsError} onOpenDocument={(path) => void select(path)} /> : graphOpen ? <KnowledgeGraph graph={graph} pageTypes={pageTypes} onOpen={openGraphNode} /> : selectedPath ? <>
         <div className="editor-toolbar">
           <div className="toolbar-left">
           <div className="mode-switch"><button className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}><Icons.eye />{tx("Preview", "Aperçu")}</button><button className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")} disabled={!canEditDocument}><Icons.edit />{tx("Edit", "Modifier")}</button></div>
@@ -660,12 +724,13 @@ export function App() {
           </div>
           <div className={`save-state ${saveStatus === "error" || saveStatus === "conflict" ? "error" : ""}`}><span className={saveStatus === "saving" ? "saving-spinner" : ""}>{saveStatus !== "saving" && <Icons.check />}</span>{uploading ? tx("Uploading image…", "Import de l’image…") : statusLabel}</div>
         </div>
-        {loadedPath !== selectedPath ? <div className="document-loading"><span className="saving-spinner" />{tx("Loading document…", "Chargement du document…")}</div> : <>
+        {loadedPath !== selectedPath ? <div className="document-loading"><span className="saving-spinner" />{tx("Loading document…", "Chargement du document…")}</div> : <div className="document-body">
+          <PageMergeProposals proposals={proposals.filter((proposal) => proposal.path === selectedPath).slice().reverse()} error={proposalsError} canReview={applicationSettings.profile.type === "human"} busy={proposalBusy} mergeBlocked={dirty || saveStatus === "saving" || !!editConflict} onAccept={acceptProposal} onReject={rejectProposal} onStatusChange={setProposalStatus} />
           {editConflict && <section className="edit-conflict" role="alert"><div><strong>Concurrent changes detected</strong><p>Another person or agent saved this page after you opened it. Your draft is still in the editor.</p><small>Latest saved version from {new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(editConflict.updatedAt))}</small><details><summary>Review latest saved Markdown</summary><pre>{editConflict.content}</pre></details></div><div className="edit-conflict-actions"><button className="button secondary" onClick={loadConcurrentVersion}>Load latest version</button><button className="button conflict-overwrite" onClick={overwriteConcurrentVersion}>Save my draft over latest</button></div></section>}
-          {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
+          {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} disabled={proposalBusy} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
           <div className="backlinks"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>Reference · {node.path}</small></button>)}</div>}</div>
-        </>}
-      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} proposals={proposals} onAcceptProposal={(id, content) => void acceptProposal(id, content)} onRejectProposal={(id) => void rejectProposal(id)} onStatusChange={(id, status) => void setProposalStatus(id, status)} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
+        </div>}
+      </> : <Dashboard nodes={homeNodes} results={homeResults} query={homeQuery} searchMode={homeSearchMode} searchLoading={homeSearchLoading} searchError={homeSearchError} space={spaceNode} canCreate={activePermissions.create} onQuery={setHomeQuery} onSearchMode={setHomeSearchMode} onOpenDocument={(path) => void select(path)} onOpenFolder={(path) => { setHomeQuery(""); setSearchParams({ space: path }); }} onCreateDocument={() => openCreate("document")} onCreateFolder={() => openCreate("directory")} />}
     </section>
 
     {notice && <div className={`toast ${notice.tone}`}><span>{notice.tone === "success" ? <Icons.check /> : "!"}</span>{notice.message}<button onClick={() => setNotice(null)} aria-label="Close"><Icons.x /></button></div>}
@@ -707,7 +772,7 @@ function FolderField({ folders, value, onChange }: { folders: Node[]; value: str
   return <label className="field"><span>Location</span><select value={value} onChange={(event) => onChange(event.target.value)}><option value="">Main space</option>{folders.map((folder) => <option key={folder.path} value={folder.path}>{folder.path}</option>)}</select></label>;
 }
 
-function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, proposals, onAcceptProposal, onRejectProposal, onStatusChange, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
+function Dashboard({ nodes, results, query, searchMode, searchLoading, searchError, space, canCreate, onQuery, onSearchMode, onOpenDocument, onOpenFolder, onCreateDocument, onCreateFolder }: {
   nodes: Node[];
   results: SearchResult[];
   query: string;
@@ -716,10 +781,6 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
   searchError: string;
   space: Node | null;
   canCreate: boolean;
-  proposals: DocumentProposal[];
-  onAcceptProposal: (id: string, content?: string) => void;
-  onRejectProposal: (id: string) => void;
-  onStatusChange: (id: string, status: ProposalStatus) => void;
   onQuery: (value: string) => void;
   onSearchMode: (mode: SearchMode) => void;
   onOpenDocument: (path: string) => void;
@@ -738,11 +799,6 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
       <div className="search-mode-toggle" aria-label="Search mode"><button className={searchMode === "names" ? "active" : ""} onClick={() => onSearchMode("names")}><strong>Names</strong><span>File and folder names</span></button><button className={searchMode === "lexical" ? "active" : ""} onClick={() => onSearchMode("lexical")}><strong>Metadata</strong><span>Exact terms across metadata and content</span></button><button className={searchMode === "hybrid" ? "active" : ""} onClick={() => onSearchMode("hybrid")}><strong>Semantic</strong><span>Lexical + semantic context</span></button></div>
     </div>
 
-    {!space && !query && proposals.length > 0 && <section className="proposal-inbox" aria-label="AI proposals">
-      <div className="section-title"><h2>AI proposals</h2><span>{proposals.length}</span></div>
-      <div className="proposal-list">{proposals.map((proposal) => <ProposalCard key={proposal.id} proposal={proposal} onAccept={onAcceptProposal} onReject={onRejectProposal} onStatusChange={onStatusChange} />)}</div>
-    </section>}
-
     {query ? <section className="search-results">
       <div className="section-title"><h2>{tx("Results", "Résultats")}</h2><span>{results.length}</span></div>
       {searchError ? <div className="no-results"><span>!</span><strong>Search unavailable</strong><p>{searchError}</p></div> : results.length ? <div className="result-list">{results.map((result) => <button key={result.path} onClick={() => result.type === "directory" ? onOpenFolder(result.path) : onOpenDocument(result.path)}><span className="result-icon">{result.type === "directory" ? <Icons.folder /> : <Icons.file />}</span><span><strong>{result.title || result.name.replace(/\.md$/, "")}</strong><small>{result.path}</small>{result.snippet && <p>{result.snippet}</p>}<i>{result.matchTypes.map((matchType) => <em key={matchType} className={matchType}>{matchType}</em>)}</i></span><b>→</b></button>)}</div> : !searchLoading && <div className="no-results"><span>⌕</span><strong>{tx("No pages or folders found", "Aucune page ou dossier trouvé")}</strong><p>{tx("Try another search term or Semantic mode.", "Essayez un autre terme ou le mode sémantique.")}</p></div>}
@@ -758,19 +814,6 @@ function Dashboard({ nodes, results, query, searchMode, searchLoading, searchErr
       })}</div> : <div className="dashboard-empty"><div className="welcome-icon"><Icons.book /></div><h2>{tx("This space is empty", "Cet espace est vide")}</h2><p>{canCreate ? tx("Create a first page or organize documentation with a folder.", "Créez une première page ou organisez la documentation avec un dossier.") : "This profile has read-only access."}</p>{canCreate && <div><button className="button primary" onClick={onCreateDocument}><Icons.plus />{tx("Create a page", "Créer une page")}</button><button className="button secondary" onClick={onCreateFolder}><Icons.folder />{tx("Create a folder", "Créer un dossier")}</button></div>}</div>}
     </>}
   </div>;
-}
-
-function ProposalCard({ proposal, onAccept, onReject, onStatusChange }: { proposal: DocumentProposal; onAccept: (id: string, content?: string) => void; onReject: (id: string) => void; onStatusChange: (id: string, status: ProposalStatus) => void }) {
-  const [content, setContent] = useState(proposal.proposedContent);
-  const [editing, setEditing] = useState(false);
-  useEffect(() => { setContent(proposal.proposedContent); }, [proposal.proposedContent]);
-  const final = proposal.status === "merged" || proposal.status === "rejected";
-  const statusLabel: Record<ProposalStatus, string> = { draft: "Draft", in_review: "In review", needs_human_input: "Needs human input", approved: "Approved", rejected: "Rejected", merged: "Merged" };
-  return <article className="proposal-card">
-    <div className="proposal-card-heading"><div><span className="profile-kind">AI WORK ITEM</span><strong>{proposal.path}</strong><small>{new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(proposal.createdAt))}</small></div><div className="proposal-card-controls"><span className="proposal-status">{statusLabel[proposal.status]}</span>{!final && <button className="icon-button" onClick={() => onReject(proposal.id)} title="Reject proposal" aria-label="Reject proposal"><Icons.x /></button>}</div></div>
-    <pre className="proposal-diff">{proposal.diff}</pre>
-    {!final && <><label className="proposal-status-control">Status<select value={proposal.status} onChange={(event) => onStatusChange(proposal.id, event.target.value as ProposalStatus)}><option value="draft">Draft</option><option value="in_review">In review</option><option value="needs_human_input">Needs human input</option><option value="approved">Approved</option></select></label>{editing && <textarea className="proposal-editor" value={content} onChange={(event) => setContent(event.target.value)} aria-label={`Edit proposal for ${proposal.path}`} />}<div className="proposal-actions"><button className="button secondary" onClick={() => setEditing((open) => !open)}>{editing ? "Hide editor" : "Modify"}</button><button className="button primary" onClick={() => onAccept(proposal.id, editing ? content : undefined)}>Merge proposal</button><button className="button ghost" onClick={() => onReject(proposal.id)}>Reject</button></div></>}
-  </article>;
 }
 
 function ProfilePage({ settings, onSave, onActivate, onOpenDocs }: {
