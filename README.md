@@ -48,7 +48,7 @@ Open the app, add a human profile on the Profiles page, then choose a storage fo
 
 ## Native MCP for local agents
 
-For step-by-step guides with tested clients, see [Calling MCP from Python](docs/mcp-python.md) and [Calling MCP from TypeScript](docs/mcp-typescript.md). Both guides are in French and cover the same setup, initialization, tool discovery, read operations, proposal workflow, create/delete exercises, and error handling. The Python client uses the standard library; the TypeScript client runs directly on Node.js 24 without an MCP SDK.
+For short English quickstarts, see [Write to a page with Python](docs/mcp-python.md) and [Write to a page with TypeScript](docs/mcp-typescript.md). Each includes a standalone script that finds an AI profile by name and proposes appending text to an existing page for human review. The Python client uses the standard library; the TypeScript client runs directly on Node.js 24 without npm packages.
 
 Start the API as described above, then configure your agent's MCP client with the Streamable HTTP URL `http://127.0.0.1:8080/mcp` (adjust the port if you change `-addr`). The endpoint implements protocol version `2025-06-18`, initialization, ping, tool discovery, and tool calls. It returns JSON responses and uses no sessions or persistent SSE stream; GET and DELETE return HTTP 405. No separate MCP process or dependency is required.
 
