@@ -9,13 +9,13 @@ active_id = "legacy"
 [profiles.legacy]
 type = "human"
 first_name = "Charly"
-last_name = "Mercier"
+last_name = "hno"
 name = ""
 team = "Robotic"
 view = true
-create = true
-edit = true
-delete = true
+create = false
+edit = false
+delete = false
 
 [profiles.cf6808da-9313-4e1a-97ec-7fe81e8130cb]
 type = "ai"

@@ -10,6 +10,12 @@ Search works locally across page names, metadata, and content. People and AI age
 
 ---
 
+## See Mnemosys in action
+
+![Mnemosys demo](assets/mnemosys-demo.png)
+
+---
+
 ## Quickstart
 
 ### Install
