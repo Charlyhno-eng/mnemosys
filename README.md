@@ -42,6 +42,8 @@ Open the app, add a human profile on the Profiles page, then choose a storage fo
 
 In the Markdown editor, press Ctrl+Z (Cmd+Z on macOS) to undo text changes, including after autosave. Ctrl+Shift+Z or Ctrl+Y redoes text changes. Text history belongs to the open page and resets when another page is loaded.
 
+Right-click an empty area of the left-hand Space tree to create a document or folder at the vault root, including when the vault is empty. Right-click a folder to create items inside it. These actions require create permission and open the existing creation dialog, where you can choose the destination.
+
 Outside text fields, press Ctrl+Z (Cmd+Z) to undo the most recent page or folder creation in this browser session. Click the documentation tree to give it focus when the editor is open. Creation undo requires delete permission and refuses to delete modified/replaced pages or nonempty folders. A failed undo of a changed or missing item reports the error and skips that entry on the next attempt. Creation undo does not provide redo or undo for rename, move, or manual delete.
 
 Histories are kept only in memory: reloading or closing the application clears them. Changing the active profile or vault also clears creation history.

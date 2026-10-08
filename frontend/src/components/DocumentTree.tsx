@@ -8,15 +8,17 @@ type Props = {
   nodes: Node[];
   selectedPath: string | null;
   permissions: { create: boolean; edit: boolean; delete: boolean };
+  onCreate: (type: Node["type"]) => void;
   onSelect: (path: string) => void;
   onAction: (node: Node, action: TreeAction) => void;
   onMove: (source: Node, targetFolder: string) => void;
 };
 
-export function DocumentTree({ nodes, selectedPath, permissions, onSelect, onAction, onMove }: Props) {
+export function DocumentTree({ nodes, selectedPath, permissions, onSelect, onCreate, onAction, onMove }: Props) {
   const tx = (english: string, _french: string) => english;
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [menuPath, setMenuPath] = useState<string | null>(null);
+  const [rootMenu, setRootMenu] = useState<{ left: number; top: number } | null>(null);
   const [dropPath, setDropPath] = useState<string | null>(null);
 
   function toggleFolder(path: string) {
@@ -49,7 +51,7 @@ export function DocumentTree({ nodes, selectedPath, permissions, onSelect, onAct
       return <li key={node.path} className="tree-item">
         <div className={`tree-row ${node.path === selectedPath ? "selected" : ""} ${dropPath === node.path ? "drop-target" : ""} ${!folder && node.aiTouched ? "ai-touched" : ""}`}
           style={{ paddingLeft: `${10 + depth * 15}px` }} draggable={permissions.edit} onDragStart={(event) => beginDrag(event, node)}
-          onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenuPath(node.path); }}
+          onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setRootMenu(null); setMenuPath(node.path); }}
           onDragOver={folder && permissions.edit ? (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropPath(node.path); } : undefined}
           onDragLeave={folder ? () => setDropPath(null) : undefined} onDrop={folder ? (event) => drop(event, node) : undefined}>
           <button className="tree-main" type="button" onClick={() => folder ? toggleFolder(node.path) : onSelect(node.path)} title={node.path}>
@@ -58,7 +60,7 @@ export function DocumentTree({ nodes, selectedPath, permissions, onSelect, onAct
             <span className="tree-label">{folder ? node.name : node.name.replace(/\.md$/, "")}</span>
             {!folder && node.aiTouched && <span className="ai-marker" title="Created or modified by AI">AI</span>}
           </button>
-          {(permissions.edit || permissions.delete || (folder && permissions.create)) && <button className="icon-button tree-more" type="button" onClick={() => setMenuPath(menuPath === node.path ? null : node.path)} aria-label={`${tx("Actions for", "Actions pour")} ${node.name}`} aria-expanded={menuPath === node.path}><Icons.more /></button>}
+          {(permissions.edit || permissions.delete || (folder && permissions.create)) && <button className="icon-button tree-more" type="button" onClick={() => { setRootMenu(null); setMenuPath(menuPath === node.path ? null : node.path); }} aria-label={`${tx("Actions for", "Actions pour")} ${node.name}`} aria-expanded={menuPath === node.path}><Icons.more /></button>}
           {menuPath === node.path && <>
             <button className="menu-scrim" type="button" aria-label={tx("Close menu", "Fermer le menu")} onClick={() => setMenuPath(null)} />
             <div className="context-menu">
@@ -78,6 +80,23 @@ export function DocumentTree({ nodes, selectedPath, permissions, onSelect, onAct
     })}</ul>;
   }
 
-  if (nodes.length === 0) return <div className="tree-empty"><Icons.file /><p>{tx("No documents", "Aucun document")}</p><span>{tx("Create your first page", "Créez votre première page")}</span></div>;
-  return render(nodes);
+  return <div className="tree-space" onContextMenu={(event) => {
+    event.preventDefault();
+    setMenuPath(null);
+    if (!permissions.create) { setRootMenu(null); return; }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setRootMenu({
+      left: Math.max(0, Math.min(event.clientX - bounds.left, bounds.width - 184)),
+      top: Math.max(0, Math.min(event.clientY, window.innerHeight - 100) - bounds.top),
+    });
+  }} onKeyDown={(event) => { if (event.key === "Escape") setRootMenu(null); }}>
+    {nodes.length === 0 ? <div className="tree-empty"><Icons.file /><p>{tx("No documents", "Aucun document")}</p><span>{tx("Create your first page", "Créez votre première page")}</span></div> : render(nodes)}
+    {rootMenu && permissions.create && <>
+      <button className="menu-scrim" type="button" aria-label="Close menu" onClick={() => setRootMenu(null)} />
+      <div className="context-menu space-context-menu" style={rootMenu}>
+        <button type="button" autoFocus onClick={() => { setRootMenu(null); onCreate("document"); }}><Icons.file />New document</button>
+        <button type="button" onClick={() => { setRootMenu(null); onCreate("directory"); }}><Icons.folder />New folder</button>
+      </div>
+    </>}
+  </div>;
 }

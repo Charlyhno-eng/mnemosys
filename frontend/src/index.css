@@ -50,6 +50,8 @@ svg { display: block; }
 .sidebar-label span:last-child { display: grid; min-width: 18px; height: 18px; place-items: center; border-radius: 9px; color: #71849a; background: #122136; font-size: 9px; letter-spacing: 0; }
 .sidebar nav { position: relative; min-height: 0; flex: 1; overflow: auto; padding: 0 7px 20px; transition: background .15s; }
 .sidebar nav.root-drop::after { content: attr(data-drop-label); position: sticky; bottom: 8px; display: block; margin: 8px; padding: 10px; border: 1px dashed #4c82c6; border-radius: 8px; color: #86b4ef; background: #102a49; text-align: center; font-size: 11px; }
+.tree-space { position: relative; min-height: 100%; }
+.space-context-menu { right: auto; }
 .tree-list { margin: 0; padding: 0; list-style: none; }
 .tree-item { position: relative; }
 .tree-row { position: relative; display: flex; min-width: 0; height: 34px; align-items: center; border: 1px solid transparent; border-radius: 7px; }
