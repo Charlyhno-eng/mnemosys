@@ -157,11 +157,25 @@ func NewHandler(service *Service) http.Handler {
 		if !decodeJSON(w, r, &input) {
 			return
 		}
-		if err := service.Create(input); err != nil {
+		token, err := service.CreateWithUndo(input)
+		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]string{"path": input.Path})
+		writeJSON(w, http.StatusCreated, map[string]string{"path": input.Path, "undoToken": token})
+	})
+	mux.HandleFunc("POST /api/documents/undo-create", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Token string `json:"token"`
+		}
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		if err := service.UndoCreate(input.Token); err != nil {
+			writeError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("PUT /api/documents", func(w http.ResponseWriter, r *http.Request) {
 		var input UpdateInput

@@ -127,6 +127,8 @@ export function App() {
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const historyRef = useRef<EditHistory>({ past: [], present: "", future: [], lastTypingAt: 0 });
+  const creationHistoryRef = useRef<Array<{ path: string; token: string }>>([]);
+  const undoCreationBusyRef = useRef(false);
   const saveInFlightRef = useRef(false);
   const pageTypes = applicationSettings.pageTypes;
   const tx = useCallback((english: string, _french: string) => english, []);
@@ -196,6 +198,10 @@ export function App() {
   }, [applicationSettings.activeProfileId, activePermissions.view]);
 
   useEffect(() => {
+    creationHistoryRef.current = [];
+  }, [storage?.vaultPath, applicationSettings.activeProfileId]);
+
+  useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 3500);
     return () => window.clearTimeout(timer);
@@ -255,7 +261,10 @@ export function App() {
         if (result.proposal) {
           setSavedContent(value);
         } else if (historyRef.current.present === value) {
-          resetHistory(savedDocument.content);
+          historyRef.current.present = savedDocument.content;
+          historyRef.current.lastTypingAt = 0;
+          setContent(savedDocument.content);
+          setHistoryVersion((version) => version + 1);
           setSavedContent(savedDocument.content);
         } else {
           setSavedContent(value);
@@ -313,7 +322,15 @@ export function App() {
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
-      const editing = Boolean(selectedPath && mode === "edit" && !modal && !storageOpen);
+      if (event.defaultPrevented || event.isComposing) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const textInput = target?.closest("input, textarea, select, [contenteditable='true']");
+      const editing = Boolean(selectedPath && loadedPath === selectedPath && canEditDocument && mode === "edit" && !modal && !storageOpen && (target === editorRef.current || target?.closest(".format-tools")));
+      if (!editing && !textInput && !modal && !storageOpen && (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        void undoCreation();
+        return;
+      }
       if (editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redo() : undo(); return; }
       if (editing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); redo(); return; }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); }
@@ -373,7 +390,9 @@ export function App() {
         if (dirty && selectedPath && !(await save(selectedPath, content))) return;
         if (modal.type === "document" && !name.endsWith(".md")) name += ".md";
         const path = joinPath(modalFolder, name);
-        await api.create(path, modal.type, modal.type === "document" ? `# ${name.replace(/\.md$/, "")}\n` : "", modal.type === "document" ? modalPageType : undefined);
+        const created = await api.create(path, modal.type, modal.type === "document" ? `# ${name.replace(/\.md$/, "")}\n` : "", modal.type === "document" ? modalPageType : undefined);
+        creationHistoryRef.current.push({ path, token: created.undoToken });
+        if (creationHistoryRef.current.length > 100) creationHistoryRef.current.shift();
         await refreshTree();
         if (modal.type === "document") setSearchParams({ doc: path });
         flash(modal.type === "document" ? tx("Document created.", "Document créé.") : tx("Folder created.", "Dossier créé."));
@@ -403,6 +422,32 @@ export function App() {
     finally { setBusy(false); }
   }
 
+  async function undoCreation() {
+    if (busy || undoCreationBusyRef.current || saveInFlightRef.current || !activePermissions.delete) return;
+    const creation = creationHistoryRef.current[creationHistoryRef.current.length - 1];
+    if (!creation) return;
+    if (dirty && selectedPath === creation.path) {
+      flash("Undo the page's text changes before undoing its creation.", "error");
+      return;
+    }
+    undoCreationBusyRef.current = true;
+    setBusy(true);
+    try {
+      await api.undoCreate(creation.token);
+      creationHistoryRef.current.pop();
+      if (selectedPath === creation.path || spacePath === creation.path) setSearchParams({ view: "docs" });
+      await refreshTree();
+      flash("Creation undone.");
+    } catch (error) {
+      // A changed or removed entry must not block undo of earlier creations.
+      if (error instanceof APIError && (error.status === 404 || error.status === 409)) creationHistoryRef.current.pop();
+      flash(error instanceof Error ? error.message : "Unable to undo creation.", "error");
+    } finally {
+      undoCreationBusyRef.current = false;
+      setBusy(false);
+    }
+  }
+
   function dropAtRoot(event: DragEvent) {
     event.preventDefault(); setRootDrop(false);
     const path = event.dataTransfer.getData("application/x-mnemosys-path");
@@ -418,7 +463,7 @@ export function App() {
 
   function changeContent(next: string, typing = false) {
     const history = historyRef.current;
-    if (next === history.present) return;
+    if (!canEditDocument || next === history.present) return;
     const now = Date.now();
     if (!typing || now - history.lastTypingAt > 700) history.past.push(history.present);
     if (history.past.length > 100) history.past.shift();
@@ -430,6 +475,7 @@ export function App() {
   }
 
   function undo() {
+    if (!canEditDocument) return;
     const history = historyRef.current;
     const previous = history.past.pop();
     if (previous === undefined) return;
@@ -441,6 +487,7 @@ export function App() {
   }
 
   function redo() {
+    if (!canEditDocument) return;
     const history = historyRef.current;
     const next = history.future.pop();
     if (next === undefined) return;
@@ -713,7 +760,7 @@ export function App() {
         <div className="document-body">
           <PageMergeProposals proposals={proposals.filter((proposal) => proposal.path === selectedPath).slice().reverse()} error={proposalsError} canReview={applicationSettings.profile.type === "human"} busy={proposalBusy} mergeBlocked={dirty || saveStatus === "saving" || !!editConflict} onAccept={acceptProposal} onReject={rejectProposal} onStatusChange={setProposalStatus} />
           {editConflict && <section className="edit-conflict" role="alert"><div><strong>Concurrent changes detected</strong><p>Another person or agent saved this page after you opened it. Your draft is still in the editor.</p><small>Latest saved version from {new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(editConflict.updatedAt))}</small><details><summary>Review latest saved Markdown</summary><pre>{editConflict.content}</pre></details></div><div className="edit-conflict-actions"><button className="button secondary" onClick={loadConcurrentVersion}>Load latest version</button><button className="button conflict-overwrite" onClick={overwriteConcurrentVersion}>Save my draft over latest</button></div></section>}
-          {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} disabled={proposalBusy} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
+          {mode === "edit" ? <div className={`editor-wrap ${imageDrag ? "image-drag" : ""}`} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setImageDrag(true); } }} onDragLeave={() => setImageDrag(false)} onDrop={dropImages}><textarea ref={editorRef} disabled={proposalBusy} value={content} onChange={(event) => changeContent(event.target.value, true)} aria-label={tx("Markdown content", "Contenu Markdown")} spellCheck placeholder={tx("Start writing in Markdown…", "Commencez à écrire en Markdown…")} /><div className="editor-hint">{tx("Markdown · Autosave · Ctrl+Z to undo · Drop an image or GIF", "Markdown · Enregistrement automatique · Déposez une image ou un GIF")}</div>{imageDrag && <div className="image-drop-overlay"><span>↓</span><strong>{tx("Drop the image here", "Déposez l’image ici")}</strong><small>{tx("PNG, JPEG, WebP or GIF · 10 MB maximum", "PNG, JPEG, WebP ou GIF · 10 Mo maximum")}</small></div>}</div> : <div className="preview-pane"><MarkdownPreview content={content} onOpenWikiLink={openWikiLink} /></div>}
         </div>
         <footer className="backlinks" aria-label="Links to this page"><div><Icons.link /><span><strong>{tx("Links to this page", "Liens vers cette page")}</strong><small>{backlinks.length ? `${backlinks.length} ${tx(backlinks.length > 1 ? "pages reference this document" : "page references this document", backlinks.length > 1 ? "pages font référence à ce document" : "page fait référence à ce document")}` : tx("No page references this document yet", "Aucune page ne fait encore référence à ce document")}</small></span></div>{backlinks.length > 0 && <div className="backlink-list">{backlinks.map((node) => <button key={node.path} onClick={() => void select(node.path)}><Icons.file /><span>{node.name.replace(/\.md$/, "")}</span><small>Reference · {node.path}</small></button>)}</div>}</footer>
         </>}

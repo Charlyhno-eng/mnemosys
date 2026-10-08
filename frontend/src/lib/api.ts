@@ -66,7 +66,8 @@ export const api = {
   },
   get: (path: string) => request<Document>(`/api/documents/content?path=${encodeURIComponent(path)}`),
   create: (path: string, type: "directory" | "document", content = "", pageType?: PageType) =>
-    request<{ path: string }>("/api/documents", { method: "POST", ...json({ path, type, content, ...(pageType ? { pageType } : {}) }) }),
+    request<{ path: string; undoToken: string }>("/api/documents", { method: "POST", ...json({ path, type, content, ...(pageType ? { pageType } : {}) }) }),
+  undoCreate: (token: string) => request<void>("/api/documents/undo-create", { method: "POST", ...json({ token }) }),
   update: (path: string, content: string, baseRevision: string) =>
     request<{ path: string; proposal?: DocumentProposal; document?: Document }>("/api/documents", { method: "PUT", ...json({ path, content, baseRevision }) }),
   move: (path: string, newPath: string) =>

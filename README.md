@@ -38,6 +38,14 @@ npm --prefix frontend run dev
 
 Open the app, add a human profile on the Profiles page, then choose a storage folder in Settings. Add AI profiles on the same page and assign their rights there.
 
+## Undo in the current session
+
+In the Markdown editor, press Ctrl+Z (Cmd+Z on macOS) to undo text changes, including after autosave. Ctrl+Shift+Z or Ctrl+Y redoes text changes. Text history belongs to the open page and resets when another page is loaded.
+
+Outside text fields, press Ctrl+Z (Cmd+Z) to undo the most recent page or folder creation in this browser session. Click the documentation tree to give it focus when the editor is open. Creation undo requires delete permission and refuses to delete modified/replaced pages or nonempty folders. A failed undo of a changed or missing item reports the error and skips that entry on the next attempt. Creation undo does not provide redo or undo for rename, move, or manual delete.
+
+Histories are kept only in memory: reloading or closing the application clears them. Changing the active profile or vault also clears creation history.
+
 ## Native MCP for local agents
 
 For English walkthroughs, see [Write to a page with Python](docs/mcp-python.md) and [Write to a page with TypeScript](docs/mcp-typescript.md). Each includes a standalone, readable script that finds an AI profile by name, initializes MCP, reads a page revision, and proposes appending text for human review. The Python client uses the standard library; the TypeScript client runs directly on Node.js 24 without npm packages.

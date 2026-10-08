@@ -15,16 +15,18 @@ import (
 // Service serializes filesystem changes so requests made through this process
 // cannot observe half-completed operations.
 type Service struct {
-	repository      *repository
-	mu              sync.RWMutex
-	configPath      string
-	storagePath     string
-	configured      bool
-	profile         ProfileSettings
-	aiPermissions   Permissions
-	profiles        []SavedProfile
-	activeProfileID string
-	proposals       map[string]DocumentProposal
+	repository        *repository
+	mu                sync.RWMutex
+	configPath        string
+	storagePath       string
+	configured        bool
+	profile           ProfileSettings
+	aiPermissions     Permissions
+	profiles          []SavedProfile
+	activeProfileID   string
+	proposals         map[string]DocumentProposal
+	creationUndo      map[string]creationUndo
+	creationUndoOrder []string
 }
 
 // VaultDirectoryName is the application-owned directory created inside a selected location.
@@ -172,6 +174,10 @@ func (s *Service) Search(query string, mode SearchMode, scope string) (SearchRes
 func (s *Service) Create(input CreateInput) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.createLocked(input)
+}
+
+func (s *Service) createLocked(input CreateInput) error {
 	if !s.allowed(s.aiPermissions.Create) {
 		return ErrForbidden
 	}
